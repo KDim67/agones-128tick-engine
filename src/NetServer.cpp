@@ -7,7 +7,7 @@ namespace engine {
 NetServer::NetServer() noexcept {
     for (size_t i = 0; i < kMaxPlayers; ++i) {
         sessions_[i].slot_id = static_cast<uint32_t>(i);
-        sessions_[i].is_active = false;
+        sessions_[i].state = SessionState::Disconnected;
         sessions_[i].peer = nullptr;
     }
 }
@@ -36,9 +36,9 @@ void NetServer::Shutdown() noexcept {
     }
 
     for (auto& session : sessions_) {
-        if (session.is_active && session.peer) {
+        if (session.state != SessionState::Disconnected && session.peer) {
             enet_peer_disconnect_now(session.peer, 0);
-            session.is_active = false;
+            session.state = SessionState::Disconnected;
             session.peer = nullptr;
         }
     }
@@ -48,9 +48,16 @@ void NetServer::Shutdown() noexcept {
     enet_deinitialize();
 }
 
-void NetServer::PollEvents() noexcept {
+void NetServer::PollEvents(uint32_t current_tick) noexcept {
     if (!host_) {
         return;
+    }
+
+    current_tick_ = current_tick;
+
+    // Reset per-tick ingress rate limiter for connected sessions
+    for (auto& session : sessions_) {
+        session.inputs_this_tick = 0;
     }
 
     ENetEvent event;
@@ -77,16 +84,32 @@ void NetServer::PollEvents() noexcept {
     }
 }
 
+void NetServer::CheckTimeouts() noexcept {
+    const auto now = std::chrono::steady_clock::now();
+
+    for (auto& session : sessions_) {
+        if (session.state == SessionState::Connected && session.peer) {
+            const auto idle_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - session.last_activity).count();
+            if (idle_ms >= static_cast<int64_t>(kClientTimeoutMs)) {
+                enet_peer_disconnect_later(session.peer, 0);
+                HandleDisconnect(session.peer);
+            }
+        }
+    }
+}
+
 void NetServer::HandleConnect(ENetPeer* peer) noexcept {
     for (auto& session : sessions_) {
-        if (!session.is_active) {
-            session.is_active = true;
+        if (session.state == SessionState::Disconnected) {
+            session.state = SessionState::Connecting;
             session.peer = peer;
             session.input_queue.count = 0;
             session.input_queue.read_idx = 0;
             session.input_queue.write_idx = 0;
+            session.last_activity = std::chrono::steady_clock::now();
+            session.last_input_sequence = 0;
+            session.last_ack_tick = 0;
             peer->data = &session;
-            ++active_players_;
             return;
         }
     }
@@ -97,12 +120,12 @@ void NetServer::HandleConnect(ENetPeer* peer) noexcept {
 void NetServer::HandleDisconnect(ENetPeer* peer) noexcept {
     if (peer->data) {
         auto* session = static_cast<ClientSession*>(peer->data);
-        session->is_active = false;
-        session->peer = nullptr;
-        peer->data = nullptr;
-        if (active_players_ > 0) {
+        if (session->state == SessionState::Connected && active_players_ > 0) {
             --active_players_;
         }
+        session->state = SessionState::Disconnected;
+        session->peer = nullptr;
+        peer->data = nullptr;
     }
 }
 
@@ -114,25 +137,112 @@ void NetServer::HandlePacket(ENetPeer* peer, const uint8_t* data, size_t length)
     PacketHeader header;
     std::memcpy(&header, data, sizeof(PacketHeader));
 
-    auto* session = static_cast<ClientSession*>(peer->data);
-    if (!session || !session->is_active) {
+    if (header.protocol_version != kProtocolVersion) {
         return;
     }
 
-    if (static_cast<PacketType>(header.type) == PacketType::ClientInput) {
+    auto* session = static_cast<ClientSession*>(peer->data);
+    if (!session || session->state == SessionState::Disconnected) {
+        return;
+    }
+
+    const auto packet_type = static_cast<PacketType>(header.type);
+
+    if (packet_type == PacketType::ConnectRequest) {
+        if (header.payload_bytes != sizeof(ConnectRequestPayload) || length < (sizeof(PacketHeader) + sizeof(ConnectRequestPayload))) {
+            return;
+        }
+
+        ConnectRequestPayload request;
+        std::memcpy(&request, data + sizeof(PacketHeader), sizeof(ConnectRequestPayload));
+
+        if (session->state == SessionState::Connecting) {
+            session->state = SessionState::Connected;
+            session->last_activity = std::chrono::steady_clock::now();
+            ++active_players_;
+
+            // Acknowledge connection with assigned slot and initial tick anchor
+            ConnectAckPayload ack{
+                .assigned_slot = session->slot_id,
+                .server_tick = current_tick_,
+                .tick_rate = static_cast<uint16_t>(kTickRate)
+            };
+            SendPacket(session->slot_id, PacketType::ConnectAck, &ack, sizeof(ConnectAckPayload), true);
+        }
+        return;
+    }
+
+    if (packet_type == PacketType::ClientInput) {
+        if (session->state != SessionState::Connected) {
+            return;
+        }
+
         if (header.payload_bytes != sizeof(ClientInputPayload) || length < (sizeof(PacketHeader) + sizeof(ClientInputPayload))) {
+            return;
+        }
+
+        // Enforce ingress rate limit per tick
+        if (session->inputs_this_tick >= kMaxInputsPerTick) {
             return;
         }
 
         ClientInputPayload input;
         std::memcpy(&input, data + sizeof(PacketHeader), sizeof(ClientInputPayload));
 
+        // Sanitize view angles against exploitation
+        if (!ValidateAndClampViewAngles(input.view_pitch, input.view_yaw)) {
+            return;
+        }
+
         // Reject stale out-of-order sequence frames
         if (input.sequence > session->last_input_sequence) {
             session->last_input_sequence = input.sequence;
             session->last_ack_tick = input.ack_tick;
+            session->last_activity = std::chrono::steady_clock::now();
+            ++session->inputs_this_tick;
             session->input_queue.Push(input);
         }
+        return;
+    }
+
+    if (packet_type == PacketType::Disconnect) {
+        HandleDisconnect(peer);
+    }
+}
+
+void NetServer::SendPacket(uint32_t slot_id, PacketType type, const void* payload, size_t payload_bytes, bool reliable) noexcept {
+    if (slot_id >= kMaxPlayers || !host_) {
+        return;
+    }
+
+    auto& session = sessions_[slot_id];
+    if (session.state == SessionState::Disconnected || !session.peer) {
+        return;
+    }
+
+    PacketHeader header{
+        .type = static_cast<uint8_t>(type),
+        .protocol_version = kProtocolVersion,
+        .payload_bytes = static_cast<uint16_t>(payload_bytes)
+    };
+
+    const size_t total_size = sizeof(PacketHeader) + payload_bytes;
+    if (total_size > control_buffer_.size()) {
+        return;
+    }
+
+    std::memcpy(control_buffer_.data(), &header, sizeof(PacketHeader));
+    if (payload && payload_bytes > 0) {
+        std::memcpy(control_buffer_.data() + sizeof(PacketHeader), payload, payload_bytes);
+    }
+
+    const enet_uint32 flags = reliable ? ENET_PACKET_FLAG_RELIABLE : ENET_PACKET_FLAG_UNSEQUENCED;
+    const enet_uint8 channel = reliable ? 1 : 0;
+
+    ENetPacket* packet = enet_packet_create(control_buffer_.data(), total_size, flags);
+    if (packet) {
+        enet_peer_send(session.peer, channel, packet);
+        enet_host_flush(host_);
     }
 }
 
@@ -143,7 +253,7 @@ void NetServer::BroadcastSnapshot(const ServerSnapshotPayload& snapshot) noexcep
 
     PacketHeader header{
         .type = static_cast<uint8_t>(PacketType::ServerSnapshot),
-        .protocol_version = 1,
+        .protocol_version = kProtocolVersion,
         .payload_bytes = sizeof(ServerSnapshotPayload)
     };
 
@@ -159,7 +269,7 @@ void NetServer::BroadcastSnapshot(const ServerSnapshotPayload& snapshot) noexcep
     }
 
     for (const auto& session : sessions_) {
-        if (session.is_active && session.peer) {
+        if (session.state == SessionState::Connected && session.peer) {
             enet_peer_send(session.peer, 0, packet);
         }
     }

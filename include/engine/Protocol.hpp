@@ -23,6 +23,25 @@ struct PacketHeader {
     uint16_t payload_bytes;
 };
 
+// Client initial connection request payload
+struct ConnectRequestPayload {
+    uint32_t protocol_version;
+    uint64_t client_auth_token;
+};
+
+// Server handshake acknowledgement payload
+struct ConnectAckPayload {
+    uint32_t assigned_slot;
+    uint32_t server_tick;
+    uint16_t tick_rate;
+};
+
+// Graceful session disconnect payload
+struct DisconnectPayload {
+    uint32_t slot_id;
+    uint32_t reason_code;
+};
+
 // Input movement flags bitmask
 enum InputFlags : uint16_t {
     InputFlag_None       = 0,
@@ -72,6 +91,15 @@ struct ServerSnapshotPayload {
 // Enforce standard layout and binary wire consistency
 static_assert(std::is_standard_layout_v<PacketHeader>);
 static_assert(sizeof(PacketHeader) == 4);
+
+static_assert(std::is_standard_layout_v<ConnectRequestPayload>);
+static_assert(sizeof(ConnectRequestPayload) == 12);
+
+static_assert(std::is_standard_layout_v<ConnectAckPayload>);
+static_assert(sizeof(ConnectAckPayload) == 10);
+
+static_assert(std::is_standard_layout_v<DisconnectPayload>);
+static_assert(sizeof(DisconnectPayload) == 8);
 
 static_assert(std::is_standard_layout_v<ClientInputPayload>);
 static_assert(sizeof(ClientInputPayload) == 20);

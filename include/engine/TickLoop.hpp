@@ -12,7 +12,9 @@ struct TickTelemetry {
     uint64_t overruns{0};
     int64_t last_execution_time_ns{0};
     int64_t peak_execution_time_ns{0};
+    int64_t avg_execution_time_ns{0};
     int64_t last_jitter_ns{0};
+    int64_t peak_jitter_ns{0};
     float current_tps{0.0f};
 };
 
@@ -29,10 +31,11 @@ public:
     TickLoop(const TickLoop&) = delete;
     TickLoop& operator=(const TickLoop&) = delete;
 
-    void Run(TickFn tick_fn, void* user_data) noexcept;
+    void Run(TickFn tick_fn, void* user_data, uint64_t max_ticks = 0) noexcept;
     void RequestStop() noexcept;
 
     [[nodiscard]] const TickTelemetry& GetTelemetry() const noexcept { return telemetry_; }
+    [[nodiscard]] uint64_t GetCurrentTick() const noexcept { return telemetry_.total_ticks; }
     [[nodiscard]] bool IsRunning() const noexcept { return is_running_.load(std::memory_order_relaxed); }
 
 private:
@@ -40,6 +43,7 @@ private:
     TickTelemetry telemetry_{};
     TimePoint last_stats_time_{};
     uint64_t stats_tick_anchor_{0};
+    int64_t exec_accum_ns_{0};
 };
 
 } // namespace engine

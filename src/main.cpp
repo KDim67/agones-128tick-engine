@@ -6,6 +6,7 @@
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 namespace {
 
@@ -29,7 +30,12 @@ void AuthoritativeTick(uint64_t tick_index, [[maybe_unused]] double dt, void* us
     auto* ctx = static_cast<ServerContext*>(user_data);
 
     // Drain inbound UDP frames without allocation
-    ctx->net_server.PollEvents();
+    ctx->net_server.PollEvents(static_cast<uint32_t>(tick_index));
+
+    // Periodic timeout evaluation once per second
+    if (tick_index > 0 && (tick_index % engine::kTickRate) == 0) {
+        ctx->net_server.CheckTimeouts();
+    }
 
     auto& sessions = ctx->net_server.GetSessions();
     uint8_t active_count = 0;
@@ -37,7 +43,7 @@ void AuthoritativeTick(uint64_t tick_index, [[maybe_unused]] double dt, void* us
     // Process queued inputs for each connected player
     for (size_t i = 0; i < engine::kMaxPlayers; ++i) {
         auto& session = sessions[i];
-        if (!session.is_active) {
+        if (session.state != engine::SessionState::Connected) {
             continue;
         }
 
@@ -61,12 +67,14 @@ void AuthoritativeTick(uint64_t tick_index, [[maybe_unused]] double dt, void* us
     // Emit telemetry summary every 128 ticks (1 second)
     if (tick_index > 0 && (tick_index % engine::kTickRate) == 0) {
         const auto& telem = ctx->tick_loop.GetTelemetry();
-        std::printf("[Tick %7llu] TPS: %5.1f | Exec: %5lld us | Peak: %5lld us | Jitter: %+5lld us | Overruns: %llu | Clients: %zu\n",
+        std::printf("[Tick %7llu] TPS: %5.1f | Exec: %4lld us (Avg: %4lld us, Peak: %4lld us) | Jitter: %+4lld us (Peak: %4lld us) | Overruns: %llu | Clients: %zu\n",
                     static_cast<unsigned long long>(tick_index),
                     static_cast<double>(telem.current_tps),
                     static_cast<long long>(telem.last_execution_time_ns / 1000),
+                    static_cast<long long>(telem.avg_execution_time_ns / 1000),
                     static_cast<long long>(telem.peak_execution_time_ns / 1000),
                     static_cast<long long>(telem.last_jitter_ns / 1000),
+                    static_cast<long long>(telem.peak_jitter_ns / 1000),
                     static_cast<unsigned long long>(telem.overruns),
                     ctx->net_server.GetActivePlayerCount());
         std::fflush(stdout);
@@ -77,8 +85,15 @@ void AuthoritativeTick(uint64_t tick_index, [[maybe_unused]] double dt, void* us
 
 int main(int argc, char* argv[]) {
     uint16_t bind_port = 7777;
-    if (argc > 1) {
-        bind_port = static_cast<uint16_t>(std::atoi(argv[1]));
+    uint64_t benchmark_seconds = 0;
+
+    // CLI argument parsing
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--port") == 0 && i + 1 < argc) {
+            bind_port = static_cast<uint16_t>(std::atoi(argv[++i]));
+        } else if (std::strcmp(argv[i], "--benchmark") == 0 && i + 1 < argc) {
+            benchmark_seconds = static_cast<uint64_t>(std::strtoull(argv[++i], nullptr, 10));
+        }
     }
 
     ServerContext context;
@@ -92,6 +107,11 @@ int main(int argc, char* argv[]) {
     std::printf(" Target Tick Budget: %.4f ms (7,812.5 us) | Port: %u UDP\n",
                 engine::kTickDurationNs.count() / 1'000'000.0,
                 bind_port);
+    if (benchmark_seconds > 0) {
+        std::printf(" Benchmark Mode: Running for %llu seconds (%llu ticks)...\n",
+                    static_cast<unsigned long long>(benchmark_seconds),
+                    static_cast<unsigned long long>(benchmark_seconds * engine::kTickRate));
+    }
     std::printf("====================================================================\n");
 
     if (!context.net_server.Initialize(bind_port)) {
@@ -100,9 +120,19 @@ int main(int argc, char* argv[]) {
     }
 
     // Run authoritative loop
-    context.tick_loop.Run(AuthoritativeTick, &context);
+    const uint64_t max_ticks = benchmark_seconds * engine::kTickRate;
+    context.tick_loop.Run(AuthoritativeTick, &context, max_ticks);
 
-    std::printf("\nInitiating graceful server shutdown...\n");
+    const auto& telem = context.tick_loop.GetTelemetry();
+    std::printf("\n====================================================================\n");
+    std::printf(" Server Execution Report\n");
+    std::printf(" Total Ticks Processed: %llu\n", static_cast<unsigned long long>(telem.total_ticks));
+    std::printf(" Final TPS: %.2f\n", static_cast<double>(telem.current_tps));
+    std::printf(" Peak Tick Exec Time: %lld us\n", static_cast<long long>(telem.peak_execution_time_ns / 1000));
+    std::printf(" Peak Tick Jitter: %lld us\n", static_cast<long long>(telem.peak_jitter_ns / 1000));
+    std::printf(" Total Tick Overruns: %llu\n", static_cast<unsigned long long>(telem.overruns));
+    std::printf("====================================================================\n");
+
     context.net_server.Shutdown();
     std::printf("Server terminated cleanly.\n");
 
