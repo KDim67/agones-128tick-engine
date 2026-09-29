@@ -25,7 +25,7 @@ bool NetServer::Initialize(uint16_t bind_port) noexcept {
     address.host = ENET_HOST_ANY;
     address.port = bind_port;
 
-    // Allocate non-blocking host: 2 channels (0: unsequenced inputs/snapshots, 1: reliable control)
+    // 2 channels: 0 for unsequenced state, 1 for reliable control
     host_ = enet_host_create(&address, kMaxPlayers, 2, 0, 0);
     return host_ != nullptr;
 }
@@ -55,13 +55,11 @@ void NetServer::PollEvents(uint32_t current_tick) noexcept {
 
     current_tick_ = current_tick;
 
-    // Reset per-tick ingress rate limiter for connected sessions
     for (auto& session : sessions_) {
         session.inputs_this_tick = 0;
     }
 
     ENetEvent event;
-    // Drain inbound OS socket buffers without blocking
     while (enet_host_service(host_, &event, 0) > 0) {
         switch (event.type) {
             case ENET_EVENT_TYPE_CONNECT:
@@ -113,7 +111,6 @@ void NetServer::HandleConnect(ENetPeer* peer) noexcept {
             return;
         }
     }
-    // Reject connection if slot pool is exhausted
     enet_peer_reset(peer);
 }
 
@@ -161,7 +158,6 @@ void NetServer::HandlePacket(ENetPeer* peer, const uint8_t* data, size_t length)
             session->last_activity = std::chrono::steady_clock::now();
             ++active_players_;
 
-            // Acknowledge connection with assigned slot and initial tick anchor
             ConnectAckPayload ack{
                 .assigned_slot = session->slot_id,
                 .server_tick = current_tick_,
@@ -181,7 +177,6 @@ void NetServer::HandlePacket(ENetPeer* peer, const uint8_t* data, size_t length)
             return;
         }
 
-        // Enforce ingress rate limit per tick
         if (session->inputs_this_tick >= kMaxInputsPerTick) {
             return;
         }
@@ -189,12 +184,11 @@ void NetServer::HandlePacket(ENetPeer* peer, const uint8_t* data, size_t length)
         ClientInputPayload input;
         std::memcpy(&input, data + sizeof(PacketHeader), sizeof(ClientInputPayload));
 
-        // Sanitize view angles against exploitation
         if (!ValidateAndClampViewAngles(input.view_pitch, input.view_yaw)) {
             return;
         }
 
-        // Reject stale out-of-order sequence frames
+        // Drop out-of-order or duplicate sequences
         if (input.sequence > session->last_input_sequence) {
             session->last_input_sequence = input.sequence;
             session->last_ack_tick = input.ack_tick;
@@ -262,7 +256,6 @@ void NetServer::BroadcastSnapshot(const ServerSnapshotPayload& snapshot) noexcep
 
     const size_t total_size = sizeof(PacketHeader) + sizeof(ServerSnapshotPayload);
 
-    // Unsequenced fire-and-forget payload for authoritative snapshot
     ENetPacket* packet = enet_packet_create(broadcast_buffer_.data(), total_size, ENET_PACKET_FLAG_UNSEQUENCED);
     if (!packet) {
         return;

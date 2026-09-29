@@ -21,6 +21,8 @@ add_executable(game_server
     src/main.cpp
     src/TickLoop.cpp
     src/NetServer.cpp
+    src/WorldState.cpp
+    src/LagCompensation.cpp
 )
 
 target_include_directories(game_server PRIVATE
@@ -30,6 +32,16 @@ target_include_directories(game_server PRIVATE
 
 target_link_libraries(game_server PRIVATE enet)
 
+add_executable(test_simulation
+    tests/test_simulation.cpp
+    src/WorldState.cpp
+    src/LagCompensation.cpp
+)
+
+target_include_directories(test_simulation PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+)
+
 if(MSVC)
     target_compile_options(game_server PRIVATE
         /W4
@@ -38,10 +50,16 @@ if(MSVC)
         /Zc:inline
         /Zc:preprocessor
     )
+    target_compile_options(test_simulation PRIVATE
+        /W4
+        /WX
+        /permissive-
+    )
     target_link_libraries(game_server PRIVATE ws2_32 winmm)
 
     if(ENABLE_SANITIZERS)
         target_compile_options(game_server PRIVATE /fsanitize=address)
+        target_compile_options(test_simulation PRIVATE /fsanitize=address)
     endif()
 else()
     target_compile_options(game_server PRIVATE
@@ -53,6 +71,12 @@ else()
         -Wshadow
         -Wnon-virtual-dtor
         -Wunused
+        -Werror
+    )
+    target_compile_options(test_simulation PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
         -Werror
     )
 

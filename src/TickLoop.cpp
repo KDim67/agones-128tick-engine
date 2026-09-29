@@ -3,6 +3,9 @@
 #include <cmath>
 
 #if defined(_WIN32)
+#if !defined(NOMINMAX)
+#define NOMINMAX
+#endif
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <timeapi.h>
@@ -12,14 +15,14 @@ namespace engine {
 
 TickLoop::TickLoop() noexcept {
 #if defined(_WIN32)
-    // Request 1ms OS scheduler quantum for Windows waitable timers
+    // 1ms timer resolution on Windows
     timeBeginPeriod(1);
 #endif
 }
 
 TickLoop::~TickLoop() {
 #if defined(_WIN32)
-    // Restore default OS scheduling period
+    // Restore default timer quantum
     timeEndPeriod(1);
 #endif
 }
@@ -29,7 +32,7 @@ void TickLoop::RequestStop() noexcept {
 }
 
 void TickLoop::Run(TickFn tick_fn, void* user_data, uint64_t max_ticks) noexcept {
-    // Elevate game thread priority to reduce OS context switch latency
+    // Realtime priority elevation
     SetThreadRealtimePriority();
 
     is_running_.store(true, std::memory_order_relaxed);
@@ -48,7 +51,7 @@ void TickLoop::Run(TickFn tick_fn, void* user_data, uint64_t max_ticks) noexcept
 
         const TimePoint tick_start = Clock::now();
 
-        // Calculate tick jitter relative to theoretical target
+        // Tick jitter relative to scheduled deadline
         const int64_t jitter_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(tick_start - next_tick_target).count();
         telemetry_.last_jitter_ns = jitter_ns;
         const int64_t abs_jitter = std::abs(jitter_ns);
@@ -56,7 +59,6 @@ void TickLoop::Run(TickFn tick_fn, void* user_data, uint64_t max_ticks) noexcept
             telemetry_.peak_jitter_ns = abs_jitter;
         }
 
-        // Execute deterministic tick logic
         tick_fn(telemetry_.total_ticks, kFixedDeltaTimeSec, user_data);
         ++telemetry_.total_ticks;
 
@@ -71,29 +73,28 @@ void TickLoop::Run(TickFn tick_fn, void* user_data, uint64_t max_ticks) noexcept
 
         next_tick_target += kTickDurationNs;
 
-        // Overrun detection and recovery
+        // Overrun recovery
         if (exec_end > next_tick_target) {
             ++telemetry_.overruns;
 
-            // Spiral of death prevention: clamp if lag exceeds catchup ceiling
+            // Clamp drift if stalled beyond catchup threshold
             const auto lag = std::chrono::duration_cast<std::chrono::nanoseconds>(exec_end - next_tick_target);
             if (lag > (kTickDurationNs * kMaxCatchupTicks)) {
                 next_tick_target = exec_end + kTickDurationNs;
             }
         } else {
-            // Sleep coarse slice to save CPU
             auto remaining = std::chrono::duration_cast<std::chrono::nanoseconds>(next_tick_target - Clock::now());
             if (remaining > kSleepThresholdNs) {
                 std::this_thread::sleep_for(remaining - kSleepThresholdNs);
             }
 
-            // Spin-wait fine slice for sub-microsecond precision
+            // Spin-wait final microsecond slice
             while (Clock::now() < next_tick_target) {
                 CpuPause();
             }
         }
 
-        // Compute TPS and rolling execution average once per second
+        // Rolling 1s execution telemetry
         const auto stats_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(exec_end - last_stats_time_);
         if (stats_elapsed.count() >= 1000) {
             const uint64_t ticks_delta = telemetry_.total_ticks - stats_tick_anchor_;

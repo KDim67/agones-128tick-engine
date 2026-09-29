@@ -8,6 +8,9 @@
 #include <string_view>
 
 #if defined(_WIN32)
+#if !defined(NOMINMAX)
+#define NOMINMAX
+#endif
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #elif defined(__linux__)
@@ -21,16 +24,15 @@
 
 namespace engine {
 
-// Tick rate configuration
+// 128Hz tick interval: 7.8125ms budget
 constexpr uint32_t kTickRate = 128;
-constexpr std::chrono::nanoseconds kTickDurationNs{1'000'000'000 / kTickRate}; // 7,812,500 ns
+constexpr std::chrono::nanoseconds kTickDurationNs{1'000'000'000 / kTickRate};
 constexpr double kFixedDeltaTimeSec = 1.0 / static_cast<double>(kTickRate);
 
-// Budget and jitter thresholds
-constexpr std::chrono::nanoseconds kSleepThresholdNs{1'500'000}; // 1.5ms threshold for spinlock transition
+// Hybrid sleep-spin threshold
+constexpr std::chrono::nanoseconds kSleepThresholdNs{1'500'000};
 constexpr uint32_t kMaxCatchupTicks = 4;
 
-// Capacity and network protocol limits
 constexpr uint8_t kProtocolVersion = 1;
 constexpr size_t kMaxPlayers = 10;
 constexpr size_t kMaxInputQueuePerClient = 64;
@@ -38,7 +40,7 @@ constexpr size_t kMaxInputsPerTick = 4;
 constexpr uint32_t kClientTimeoutMs = 5000;
 constexpr size_t kMaxMtuPayload = 1200;
 
-// Low-overhead CPU yield intrinsic
+// Low-overhead CPU pause intrinsic
 inline void CpuPause() noexcept {
 #if defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_X64))
     _mm_pause();
@@ -46,12 +48,10 @@ inline void CpuPause() noexcept {
     __builtin_ia32_pause();
 #elif defined(__aarch64__)
     asm volatile("yield" ::: "memory");
-#else
-    // Fallback yield
 #endif
 }
 
-// Elevate calling thread scheduling priority to prevent OS preemption
+// Elevate thread scheduling priority
 inline bool SetThreadRealtimePriority() noexcept {
 #if defined(_WIN32)
     return SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL) != 0;
@@ -64,7 +64,7 @@ inline bool SetThreadRealtimePriority() noexcept {
 #endif
 }
 
-// Sanitize and clamp view angle inputs against exploits and invalid floats
+// Clamp view angles to prevent NaNs and camera inversion
 inline bool ValidateAndClampViewAngles(float& pitch, float& yaw) noexcept {
     if (!std::isfinite(pitch) || !std::isfinite(yaw)) {
         return false;
