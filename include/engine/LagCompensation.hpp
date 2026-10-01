@@ -11,6 +11,9 @@ namespace engine {
 
 struct HitResult {
     bool hit{false};
+    bool occluded{false};
+    bool rejected{false};
+    bool fired{false};
     uint32_t victim_slot{0};
     float hit_distance{0.0f};
     Vec3 hit_position{0.0f, 0.0f, 0.0f};

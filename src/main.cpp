@@ -5,6 +5,8 @@
 #include "engine/WorldState.hpp"
 #include "engine/HistoryBuffer.hpp"
 #include "engine/LagCompensation.hpp"
+#include "engine/Metrics.hpp"
+#include "engine/MetricsServer.hpp"
 
 #include <csignal>
 #include <cstdio>
@@ -20,6 +22,8 @@ struct ServerContext {
     engine::HistoryBuffer history_buffer{};
     engine::LagCompensationManager lag_comp{};
     engine::ServerSnapshotPayload current_snapshot{};
+    engine::Metrics metrics{};
+    engine::MetricsServer metrics_server{};
 };
 
 ServerContext* g_context = nullptr;
@@ -32,6 +36,7 @@ void SignalHandler(int signal) {
 
 // 128Hz authoritative tick callback
 void AuthoritativeTick(uint64_t tick_index, double dt, void* user_data) {
+    const auto tick_start = engine::TickLoop::Clock::now();
     auto* ctx = static_cast<ServerContext*>(user_data);
     const auto current_tick = static_cast<uint32_t>(tick_index);
 
@@ -60,6 +65,8 @@ void AuthoritativeTick(uint64_t tick_index, double dt, void* user_data) {
                     const auto hit = ctx->lag_comp.ProcessShot(
                         ctx->world_state, ctx->history_buffer,
                         session.slot_id, input.ack_tick, input.sub_tick_fraction);
+
+                    ctx->metrics.RecordCombat(hit.fired, hit.hit, hit.occluded, hit.rejected);
 
                     if (hit.hit) {
                         const auto* victim = ctx->world_state.GetPlayer(hit.victim_slot);
@@ -116,6 +123,15 @@ void AuthoritativeTick(uint64_t tick_index, double dt, void* user_data) {
     ctx->current_snapshot.entity_count = entity_count;
     ctx->net_server.BroadcastSnapshot(ctx->current_snapshot);
 
+    const auto tick_end = engine::TickLoop::Clock::now();
+    const int64_t duration_us = std::chrono::duration_cast<std::chrono::microseconds>(tick_end - tick_start).count();
+    const int64_t jitter_us = ctx->tick_loop.GetTelemetry().last_jitter_ns / 1000;
+    constexpr int64_t kTickBudgetUs = engine::kTickDurationNs.count() / 1000;
+    const bool overrun = (duration_us > kTickBudgetUs);
+
+    ctx->metrics.RecordTick(duration_us, jitter_us, overrun);
+    ctx->metrics.SetActivePlayers(static_cast<uint32_t>(ctx->net_server.GetActivePlayerCount()));
+
     // Periodic 1Hz telemetry summary
     if (tick_index > 0 && (tick_index % engine::kTickRate) == 0) {
         const auto& telem = ctx->tick_loop.GetTelemetry();
@@ -144,11 +160,14 @@ void AuthoritativeTick(uint64_t tick_index, double dt, void* user_data) {
 
 int main(int argc, char* argv[]) {
     uint16_t bind_port = 7777;
+    uint16_t metrics_port = 9090;
     uint64_t benchmark_seconds = 0;
 
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--port") == 0 && i + 1 < argc) {
             bind_port = static_cast<uint16_t>(std::atoi(argv[++i]));
+        } else if (std::strcmp(argv[i], "--metrics-port") == 0 && i + 1 < argc) {
+            metrics_port = static_cast<uint16_t>(std::atoi(argv[++i]));
         } else if (std::strcmp(argv[i], "--benchmark") == 0 && i + 1 < argc) {
             benchmark_seconds = static_cast<uint64_t>(std::strtoull(argv[++i], nullptr, 10));
         }
@@ -165,6 +184,7 @@ int main(int argc, char* argv[]) {
     std::printf(" Target Tick Budget: %.4f ms (7,812.5 us) | Port: %u UDP\n",
                 engine::kTickDurationNs.count() / 1'000'000.0,
                 bind_port);
+    std::printf(" Prometheus Exporter: http://0.0.0.0:%u/metrics\n", metrics_port);
     if (benchmark_seconds > 0) {
         std::printf(" Benchmark Mode: Running for %llu seconds (%llu ticks)...\n",
                     static_cast<unsigned long long>(benchmark_seconds),
@@ -175,6 +195,10 @@ int main(int argc, char* argv[]) {
     if (!context.net_server.Initialize(bind_port)) {
         std::fprintf(stderr, "Fatal: Failed to bind ENet UDP server on port %u\n", bind_port);
         return 1;
+    }
+
+    if (!context.metrics_server.Start(metrics_port, context.metrics)) {
+        std::fprintf(stderr, "Warning: Failed to bind Prometheus metrics server on port %u\n", metrics_port);
     }
 
     const uint64_t max_ticks = benchmark_seconds * engine::kTickRate;
@@ -200,6 +224,7 @@ int main(int argc, char* argv[]) {
     std::printf(" Rejected Rewinds: %llu\n", static_cast<unsigned long long>(lag_telem.rejected_rewinds));
     std::printf("====================================================================\n");
 
+    context.metrics_server.Stop();
     context.net_server.Shutdown();
     std::printf("Server terminated cleanly.\n");
 

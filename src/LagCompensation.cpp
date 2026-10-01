@@ -16,6 +16,7 @@ HitResult LagCompensationManager::ProcessShot(WorldState& world, const HistoryBu
     }
 
     if (!history.IsTickValid(target_tick)) {
+        result.rejected = true;
         ++telemetry_.rejected_rewinds;
         return result;
     }
@@ -24,10 +25,12 @@ HitResult LagCompensationManager::ProcessShot(WorldState& world, const HistoryBu
     const float continuous_tick = static_cast<float>(target_tick) + std::clamp(sub_tick_fraction, 0.0f, 0.999f);
     WorldSnapshot historical_snapshot;
     if (!history.GetInterpolatedSnapshot(continuous_tick, historical_snapshot)) {
+        result.rejected = true;
         ++telemetry_.rejected_rewinds;
         return result;
     }
 
+    result.fired = true;
     ++telemetry_.total_shots;
 
     const Vec3 eye_pos = shooter->GetEyePosition();
@@ -117,6 +120,7 @@ HitResult LagCompensationManager::ProcessShot(WorldState& world, const HistoryBu
             result.killed = live_victim->TakeDamage(result.damage);
         }
     } else if (world_occluded) {
+        result.occluded = true;
         ++telemetry_.occluded_shots;
     }
 

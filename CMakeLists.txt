@@ -23,6 +23,8 @@ add_executable(game_server
     src/NetServer.cpp
     src/WorldState.cpp
     src/LagCompensation.cpp
+    src/Metrics.cpp
+    src/MetricsServer.cpp
 )
 
 target_include_directories(game_server PRIVATE
@@ -42,6 +44,16 @@ target_include_directories(test_simulation PRIVATE
     ${PROJECT_SOURCE_DIR}/include
 )
 
+add_executable(test_telemetry
+    tests/test_telemetry.cpp
+    src/Metrics.cpp
+    src/MetricsServer.cpp
+)
+
+target_include_directories(test_telemetry PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+)
+
 if(MSVC)
     target_compile_options(game_server PRIVATE
         /W4
@@ -55,11 +67,18 @@ if(MSVC)
         /WX
         /permissive-
     )
+    target_compile_options(test_telemetry PRIVATE
+        /W4
+        /WX
+        /permissive-
+    )
     target_link_libraries(game_server PRIVATE ws2_32 winmm)
+    target_link_libraries(test_telemetry PRIVATE ws2_32)
 
     if(ENABLE_SANITIZERS)
         target_compile_options(game_server PRIVATE /fsanitize=address)
         target_compile_options(test_simulation PRIVATE /fsanitize=address)
+        target_compile_options(test_telemetry PRIVATE /fsanitize=address)
     endif()
 else()
     target_compile_options(game_server PRIVATE
@@ -79,11 +98,19 @@ else()
         -Wpedantic
         -Werror
     )
+    target_compile_options(test_telemetry PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+        -Werror
+    )
 
     if(WIN32)
         target_link_libraries(game_server PRIVATE ws2_32 winmm)
+        target_link_libraries(test_telemetry PRIVATE ws2_32)
     else()
         target_link_libraries(game_server PRIVATE pthread)
+        target_link_libraries(test_telemetry PRIVATE pthread)
     endif()
 
     if(ENABLE_SANITIZERS)
