@@ -164,6 +164,53 @@
           "unit": "none"
         }
       }
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "id": 6,
+      "title": "GameServers by Agones Lifecycle State (SDK Sidecar View)",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "count by (state) (game_agones_state == 1)",
+          "legendFormat": "{{state}}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "horizontal",
+        "textMode": "value_and_name",
+        "colorMode": "background"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": { "mode": "palette-classic" }
+        }
+      }
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "id": 7,
+      "title": "Fleet Capacity (Agones Controller)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (type) (agones_gameservers_count{fleet_name=\"agones-128tick-engine\"})",
+          "legendFormat": "{{type}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        }
+      }
     }
   ],
   "refresh": "5s",

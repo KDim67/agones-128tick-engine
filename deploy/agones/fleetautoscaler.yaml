@@ -1,0 +1,19 @@
+# Keeps two warm Ready servers ahead of allocation demand
+apiVersion: autoscaling.agones.dev/v1
+kind: FleetAutoscaler
+metadata:
+  name: agones-128tick-engine
+  labels:
+    app.kubernetes.io/name: agones-128tick-engine
+spec:
+  fleetName: agones-128tick-engine
+  policy:
+    type: Buffer
+    buffer:
+      bufferSize: 2
+      minReplicas: 2
+      maxReplicas: 20
+  sync:
+    type: FixedInterval
+    fixedInterval:
+      seconds: 30

@@ -42,6 +42,10 @@ void Metrics::SetActivePlayers(uint32_t count) noexcept {
     active_players_.store(count, std::memory_order_relaxed);
 }
 
+void Metrics::SetGameServerState(GameServerState state) noexcept {
+    gameserver_state_.store(static_cast<uint8_t>(state), std::memory_order_relaxed);
+}
+
 size_t Metrics::Serialize(char* out_buffer, size_t max_bytes) const noexcept {
     if (!out_buffer || max_bytes == 0) {
         return 0;
@@ -111,6 +115,17 @@ size_t Metrics::Serialize(char* out_buffer, size_t max_bytes) const noexcept {
     append("# TYPE game_rejected_rewinds counter\n");
     append("game_rejected_rewinds %llu\n",
            static_cast<unsigned long long>(rejected_rewinds_.load(std::memory_order_relaxed)));
+
+    // Stateset: one series per state, active at 1
+    append("# HELP game_agones_state Agones GameServer lifecycle state reported by the SDK sidecar\n");
+    append("# TYPE game_agones_state gauge\n");
+    const auto current_state = static_cast<size_t>(gameserver_state_.load(std::memory_order_relaxed));
+    for (size_t i = 0; i < kGameServerStateCount; ++i) {
+        append("game_agones_state{state=\"%.*s\"} %d\n",
+               static_cast<int>(kGameServerStateNames[i].size()),
+               kGameServerStateNames[i].data(),
+               i == current_state ? 1 : 0);
+    }
 
     return static_cast<size_t>(std::min(offset, static_cast<int>(max_bytes - 1)));
 }

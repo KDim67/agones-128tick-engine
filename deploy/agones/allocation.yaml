@@ -1,0 +1,10 @@
+# Matchmaker-equivalent allocation: kubectl create -f deploy/agones/allocation.yaml -o yaml
+apiVersion: allocation.agones.dev/v1
+kind: GameServerAllocation
+metadata:
+  generateName: agones-128tick-engine-
+spec:
+  scheduling: Packed
+  selectors:
+    - matchLabels:
+        agones.dev/fleet: agones-128tick-engine

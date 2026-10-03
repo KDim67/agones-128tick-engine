@@ -7,13 +7,13 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(ENABLE_SANITIZERS "Enable ASan and UBSan instrumentation" OFF)
+option(ENGINE_WITH_AGONES "Link the Agones C++ SDK for GameServer lifecycle control" OFF)
 
 include(FetchContent)
 FetchContent_Declare(
     enet
     GIT_REPOSITORY https://github.com/lsalzman/enet.git
-    GIT_TAG v1.3.18
-    GIT_SHALLOW TRUE
+    GIT_TAG 2662c0de09e36f2a2030ccc2c528a3e4c9e8138a # v1.3.18
 )
 FetchContent_MakeAvailable(enet)
 
@@ -33,6 +33,18 @@ target_include_directories(game_server PRIVATE
 )
 
 target_link_libraries(game_server PRIVATE enet)
+
+if(ENGINE_WITH_AGONES)
+    find_package(agones CONFIG REQUIRED)
+    target_sources(game_server PRIVATE src/AgonesBridge.cpp)
+    target_link_libraries(game_server PRIVATE agones)
+    if(MSVC)
+        # std::getenv for AGONES_SDK_GRPC_PORT trips C4996 under /WX
+        target_compile_definitions(game_server PRIVATE _CRT_SECURE_NO_WARNINGS)
+    endif()
+else()
+    target_sources(game_server PRIVATE src/AgonesBridgeNull.cpp)
+endif()
 
 add_executable(test_simulation
     tests/test_simulation.cpp
@@ -54,6 +66,14 @@ target_include_directories(test_telemetry PRIVATE
     ${PROJECT_SOURCE_DIR}/include
 )
 
+add_executable(test_orchestration
+    tests/test_orchestration.cpp
+)
+
+target_include_directories(test_orchestration PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+)
+
 if(MSVC)
     target_compile_options(game_server PRIVATE
         /W4
@@ -72,6 +92,11 @@ if(MSVC)
         /WX
         /permissive-
     )
+    target_compile_options(test_orchestration PRIVATE
+        /W4
+        /WX
+        /permissive-
+    )
     target_link_libraries(game_server PRIVATE ws2_32 winmm)
     target_link_libraries(test_telemetry PRIVATE ws2_32)
 
@@ -79,6 +104,7 @@ if(MSVC)
         target_compile_options(game_server PRIVATE /fsanitize=address)
         target_compile_options(test_simulation PRIVATE /fsanitize=address)
         target_compile_options(test_telemetry PRIVATE /fsanitize=address)
+        target_compile_options(test_orchestration PRIVATE /fsanitize=address)
     endif()
 else()
     target_compile_options(game_server PRIVATE
@@ -104,6 +130,12 @@ else()
         -Wpedantic
         -Werror
     )
+    target_compile_options(test_orchestration PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+        -Werror
+    )
 
     if(WIN32)
         target_link_libraries(game_server PRIVATE ws2_32 winmm)
@@ -123,3 +155,10 @@ else()
         )
     endif()
 endif()
+
+enable_testing()
+add_test(NAME test_simulation COMMAND test_simulation)
+add_test(NAME test_telemetry COMMAND test_telemetry)
+add_test(NAME test_orchestration COMMAND test_orchestration)
+
+install(TARGETS game_server RUNTIME DESTINATION bin COMPONENT runtime)

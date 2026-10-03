@@ -1,6 +1,7 @@
 #include "engine/TickLoop.hpp"
 #include <thread>
 #include <cmath>
+#include <cstdio>
 
 #if defined(_WIN32)
 #if !defined(NOMINMAX)
@@ -28,12 +29,15 @@ TickLoop::~TickLoop() {
 }
 
 void TickLoop::RequestStop() noexcept {
-    is_running_.store(false, std::memory_order_relaxed);
+    // Sticky: a SIGTERM during startup must survive Run() entry
+    stop_requested_.store(true, std::memory_order_relaxed);
 }
 
 void TickLoop::Run(TickFn tick_fn, void* user_data, uint64_t max_ticks) noexcept {
-    // Realtime priority elevation
-    SetThreadRealtimePriority();
+    // Realtime priority elevation; denied without CAP_SYS_NICE in containers
+    if (!SetThreadRealtimePriority()) {
+        std::fprintf(stderr, "Warning: Realtime scheduling denied, tick thread runs at default priority\n");
+    }
 
     is_running_.store(true, std::memory_order_relaxed);
 
@@ -44,7 +48,7 @@ void TickLoop::Run(TickFn tick_fn, void* user_data, uint64_t max_ticks) noexcept
     telemetry_.total_ticks = 0;
     telemetry_.current_tps = static_cast<float>(kTickRate);
 
-    while (is_running_.load(std::memory_order_relaxed)) {
+    while (!stop_requested_.load(std::memory_order_relaxed)) {
         if (max_ticks > 0 && telemetry_.total_ticks >= max_ticks) {
             break;
         }

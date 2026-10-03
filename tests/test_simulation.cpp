@@ -3,8 +3,8 @@
 #include "engine/WorldState.hpp"
 #include "engine/HistoryBuffer.hpp"
 #include "engine/LagCompensation.hpp"
+#include "Check.hpp"
 
-#include <cassert>
 #include <cstdio>
 #include <cmath>
 
@@ -26,10 +26,10 @@ void TestKinematicsAndCollision() {
     }
 
     const auto* p = world.GetPlayer(0);
-    assert(p != nullptr);
-    assert(p->position.z > 0.0f);
-    assert(p->position.y == 0.0f);
-    assert(p->IsGrounded());
+    CHECK(p != nullptr);
+    CHECK(p->position.z > 0.0f);
+    CHECK(p->position.y == 0.0f);
+    CHECK(p->IsGrounded());
 
     // Obstacle collision against pillar 0: [-11, 0, -11] to [-9, 3, -9]
     world.SpawnPlayer(1, engine::Vec3{-8.5f, 0.0f, -10.0f});
@@ -38,7 +38,7 @@ void TestKinematicsAndCollision() {
         world.IntegratePlayerInput(1, input, engine::kFixedDeltaTimeSec);
     }
     const auto* p_obs = world.GetPlayer(1);
-    assert(p_obs->position.x >= -9.0f + engine::kStandingHalfExtents.x);
+    CHECK(p_obs->position.x >= -9.0f + engine::kStandingHalfExtents.x);
 
     std::printf("  -> Kinematics & collision passed. Grounded Z: %.3f m, Obstacle clamped X: %.3f m\n",
                 p->position.z, p_obs->position.x);
@@ -56,15 +56,15 @@ void TestHistoryBuffer() {
         history.Record(tick, tick * 7'812'500ULL, dummy_players);
     }
 
-    assert(history.GetLatestTick() == 149);
-    assert(!history.IsTickValid(10));
-    assert(!history.IsTickValid(21));
-    assert(history.IsTickValid(22));
-    assert(history.IsTickValid(149));
+    CHECK(history.GetLatestTick() == 149);
+    CHECK(!history.IsTickValid(10));
+    CHECK(!history.IsTickValid(21));
+    CHECK(history.IsTickValid(22));
+    CHECK(history.IsTickValid(149));
 
     engine::WorldSnapshot interp_snap;
-    assert(history.GetInterpolatedSnapshot(100.5f, interp_snap));
-    assert(std::abs(interp_snap.players[0].position.x - 100.5f) < 1e-4f);
+    CHECK(history.GetInterpolatedSnapshot(100.5f, interp_snap));
+    CHECK(std::abs(interp_snap.players[0].position.x - 100.5f) < 1e-4f);
 
     std::printf("  -> History buffer passed. 128 snapshots retained, sub-tick lerp verified.\n");
 }
@@ -93,14 +93,14 @@ void TestMultiHitboxAndLagCompensation() {
     live_shooter.view_pitch = 0.0f;
     live_shooter.view_yaw = 0.0f;
     const engine::HitResult head_hit = lag_comp.ProcessShot(world, history, 0, 100, 0.0f);
-    assert(head_hit.hit);
-    assert(head_hit.victim_slot == 1);
-    assert(head_hit.hit_zone == engine::HitZone::Head);
-    assert(head_hit.damage == 150);
-    assert(head_hit.killed);
+    CHECK(head_hit.hit);
+    CHECK(head_hit.victim_slot == 1);
+    CHECK(head_hit.hit_zone == engine::HitZone::Head);
+    CHECK(head_hit.damage == 150);
+    CHECK(head_hit.killed);
 
     // Verify live state restoration
-    assert(std::abs(world.GetPlayer(1)->position.x - 30.0f) < 1e-4f);
+    CHECK(std::abs(world.GetPlayer(1)->position.x - 30.0f) < 1e-4f);
 
     world.SpawnPlayer(1, engine::Vec3{0.0f, 0.0f, 10.0f});
     history.Record(120, 120 * 7'812'500ULL, world.GetPlayers());
@@ -109,27 +109,27 @@ void TestMultiHitboxAndLagCompensation() {
     live_shooter.view_pitch = 2.7f;
     live_shooter.view_yaw = 0.0f;
     const engine::HitResult torso_hit = lag_comp.ProcessShot(world, history, 0, 120, 0.0f);
-    assert(torso_hit.hit);
-    assert(torso_hit.hit_zone == engine::HitZone::Torso);
-    assert(torso_hit.damage == 40);
-    assert(!torso_hit.killed);
-    assert(world.GetPlayer(1)->health == 60);
+    CHECK(torso_hit.hit);
+    CHECK(torso_hit.hit_zone == engine::HitZone::Torso);
+    CHECK(torso_hit.damage == 40);
+    CHECK(!torso_hit.killed);
+    CHECK(world.GetPlayer(1)->health == 60);
 
     // Legs shot (~0.40m)
     live_shooter.view_pitch = 7.3f;
     live_shooter.view_yaw = 0.0f;
     const engine::HitResult leg_hit = lag_comp.ProcessShot(world, history, 0, 120, 0.0f);
-    assert(leg_hit.hit);
-    assert(leg_hit.hit_zone == engine::HitZone::Legs);
-    assert(leg_hit.damage == 30);
-    assert(world.GetPlayer(1)->health == 30);
+    CHECK(leg_hit.hit);
+    CHECK(leg_hit.hit_zone == engine::HitZone::Legs);
+    CHECK(leg_hit.damage == 30);
+    CHECK(world.GetPlayer(1)->health == 30);
 
     // Sub-tick lerp at tick 100.5 -> target at (1.0, 0.0, 10.0)
     world.SpawnPlayer(1, engine::Vec3{0.0f, 0.0f, 10.0f});
     live_shooter.view_pitch = 0.0f;
     live_shooter.view_yaw = 5.71f;
     const engine::HitResult subtick_hit = lag_comp.ProcessShot(world, history, 0, 100, 0.5f);
-    assert(subtick_hit.hit);
+    CHECK(subtick_hit.hit);
 
     std::printf("  -> Multi-hitbox (Head: %u dmg, Torso: %u dmg, Legs: %u dmg) and Sub-tick lerp passed.\n",
                 head_hit.damage, torso_hit.damage, leg_hit.damage);
@@ -152,8 +152,8 @@ void TestWorldOcclusion() {
     shooter.view_yaw = 0.0f;
 
     const engine::HitResult occluded_hit = lag_comp.ProcessShot(world, history, 0, 50, 0.0f);
-    assert(!occluded_hit.hit);
-    assert(lag_comp.GetTelemetry().occluded_shots > 0);
+    CHECK(!occluded_hit.hit);
+    CHECK(lag_comp.GetTelemetry().occluded_shots > 0);
 
     std::printf("  -> World obstacle occlusion passed. Bullet stopped by cover pillar.\n");
 }

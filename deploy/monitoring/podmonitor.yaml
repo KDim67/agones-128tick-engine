@@ -1,0 +1,21 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: agones-128tick-engine
+  labels:
+    app.kubernetes.io/name: agones-128tick-engine
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agones-128tick-engine
+      app.kubernetes.io/component: game-server
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+      interval: 5s
+      scrapeTimeout: 4s
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_label_agones_dev_gameserver]
+          targetLabel: gameserver
+        - sourceLabels: [__meta_kubernetes_pod_node_name]
+          targetLabel: node

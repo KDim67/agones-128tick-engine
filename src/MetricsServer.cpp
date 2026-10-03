@@ -24,15 +24,48 @@ namespace engine {
 
 namespace {
 
+constexpr int kClientIoTimeoutMs = 1000;
+
 #if defined(_WIN32)
 using SocketType = SOCKET;
+using IoResult = int;
 constexpr SocketType kInvalidSocket = INVALID_SOCKET;
 inline void CloseSocket(SocketType s) { closesocket(s); }
+inline IoResult SocketSend(SocketType s, const char* data, size_t len) { return send(s, data, static_cast<int>(len), 0); }
+inline IoResult SocketRecv(SocketType s, char* data, size_t len) { return recv(s, data, static_cast<int>(len), 0); }
+
+inline void SetClientTimeouts(SocketType s) {
+    const DWORD timeout = kClientIoTimeoutMs;
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+}
 #else
 using SocketType = int;
+using IoResult = ssize_t;
 constexpr SocketType kInvalidSocket = -1;
 inline void CloseSocket(SocketType s) { close(s); }
+// No SIGPIPE on scraper disconnect
+inline IoResult SocketSend(SocketType s, const char* data, size_t len) { return send(s, data, len, MSG_NOSIGNAL); }
+inline IoResult SocketRecv(SocketType s, char* data, size_t len) { return recv(s, data, len, 0); }
+
+inline void SetClientTimeouts(SocketType s) {
+    const timeval timeout{kClientIoTimeoutMs / 1000, (kClientIoTimeoutMs % 1000) * 1000};
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+}
 #endif
+
+bool SendAll(SocketType s, const char* data, size_t len) {
+    while (len > 0) {
+        const IoResult sent = SocketSend(s, data, len);
+        if (sent <= 0) {
+            return false;
+        }
+        data += sent;
+        len -= static_cast<size_t>(sent);
+    }
+    return true;
+}
 
 } // namespace
 
@@ -140,7 +173,10 @@ void MetricsServer::RunServer() noexcept {
             continue;
         }
 
-        const int bytes_read = recv(client_sock, request_buf.data(), static_cast<int>(request_buf.size() - 1), 0);
+        // Bound client I/O against stalled scrapers
+        SetClientTimeouts(client_sock);
+
+        const IoResult bytes_read = SocketRecv(client_sock, request_buf.data(), request_buf.size() - 1);
         if (bytes_read > 0) {
             request_buf[static_cast<size_t>(bytes_read)] = '\0';
 
@@ -155,8 +191,9 @@ void MetricsServer::RunServer() noexcept {
                     "Connection: close\r\n\r\n",
                     body_len);
 
-                send(client_sock, header_buf.data(), header_len, 0);
-                send(client_sock, response_body.data(), static_cast<int>(body_len), 0);
+                if (header_len > 0 && SendAll(client_sock, header_buf.data(), static_cast<size_t>(header_len))) {
+                    SendAll(client_sock, response_body.data(), body_len);
+                }
             } else if (std::strncmp(request_buf.data(), "GET /healthz", 12) == 0 ||
                        std::strncmp(request_buf.data(), "GET / ", 6) == 0) {
                 const char* kHealthResponse =
@@ -164,13 +201,13 @@ void MetricsServer::RunServer() noexcept {
                     "Content-Type: text/plain\r\n"
                     "Content-Length: 2\r\n"
                     "Connection: close\r\n\r\nOK";
-                send(client_sock, kHealthResponse, static_cast<int>(std::strlen(kHealthResponse)), 0);
+                SendAll(client_sock, kHealthResponse, std::strlen(kHealthResponse));
             } else {
                 const char* kNotFound =
                     "HTTP/1.1 404 Not Found\r\n"
                     "Content-Length: 0\r\n"
                     "Connection: close\r\n\r\n";
-                send(client_sock, kNotFound, static_cast<int>(std::strlen(kNotFound)), 0);
+                SendAll(client_sock, kNotFound, std::strlen(kNotFound));
             }
         }
 

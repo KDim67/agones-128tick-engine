@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Common.hpp"
+#include "GameServerLifecycle.hpp"
 #include <atomic>
 #include <array>
 #include <cstdint>
@@ -28,6 +29,9 @@ public:
     // Update current connected client gauge
     void SetActivePlayers(uint32_t count) noexcept;
 
+    // Mirror Agones GameServer lifecycle state
+    void SetGameServerState(GameServerState state) noexcept;
+
     // Serialize all registered metrics into Prometheus text format
     size_t Serialize(char* out_buffer, size_t max_bytes) const noexcept;
 
@@ -38,6 +42,7 @@ private:
     std::atomic<uint64_t> total_ticks_{0};
     std::atomic<uint64_t> tick_overruns_{0};
     std::atomic<uint32_t> active_players_{0};
+    std::atomic<uint8_t> gameserver_state_{0};
 
     std::atomic<int64_t> last_tick_duration_us_{0};
     std::atomic<int64_t> last_tick_jitter_us_{0};

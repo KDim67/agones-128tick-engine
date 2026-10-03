@@ -7,7 +7,9 @@
 #include "engine/LagCompensation.hpp"
 #include "engine/Metrics.hpp"
 #include "engine/MetricsServer.hpp"
+#include "engine/AgonesBridge.hpp"
 
+#include <charconv>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
@@ -24,9 +26,12 @@ struct ServerContext {
     engine::ServerSnapshotPayload current_snapshot{};
     engine::Metrics metrics{};
     engine::MetricsServer metrics_server{};
+    engine::AgonesBridge agones{};
 };
 
 ServerContext* g_context = nullptr;
+
+constexpr uint32_t kMaxEmptyGraceSec = 86400;
 
 void SignalHandler(int signal) {
     if (g_context && (signal == SIGINT || signal == SIGTERM)) {
@@ -129,11 +134,18 @@ void AuthoritativeTick(uint64_t tick_index, double dt, void* user_data) {
     constexpr int64_t kTickBudgetUs = engine::kTickDurationNs.count() / 1000;
     const bool overrun = (duration_us > kTickBudgetUs);
 
+    const auto active_players = static_cast<uint32_t>(ctx->net_server.GetActivePlayerCount());
     ctx->metrics.RecordTick(duration_us, jitter_us, overrun);
-    ctx->metrics.SetActivePlayers(static_cast<uint32_t>(ctx->net_server.GetActivePlayerCount()));
+    ctx->metrics.SetActivePlayers(active_players);
+    ctx->agones.PublishTick(tick_index + 1, active_players);
 
-    // Periodic 1Hz telemetry summary
+    // 1Hz Agones state sync and telemetry summary
     if (tick_index > 0 && (tick_index % engine::kTickRate) == 0) {
+        ctx->metrics.SetGameServerState(ctx->agones.GetState());
+        if (ctx->agones.IsShutdownRequested()) {
+            ctx->tick_loop.RequestStop();
+        }
+
         const auto& telem = ctx->tick_loop.GetTelemetry();
         const auto& lag_telem = ctx->lag_comp.GetTelemetry();
 
@@ -162,6 +174,8 @@ int main(int argc, char* argv[]) {
     uint16_t bind_port = 7777;
     uint16_t metrics_port = 9090;
     uint64_t benchmark_seconds = 0;
+    bool agones_enabled = false;
+    engine::AgonesConfig agones_config{};
 
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--port") == 0 && i + 1 < argc) {
@@ -170,6 +184,18 @@ int main(int argc, char* argv[]) {
             metrics_port = static_cast<uint16_t>(std::atoi(argv[++i]));
         } else if (std::strcmp(argv[i], "--benchmark") == 0 && i + 1 < argc) {
             benchmark_seconds = static_cast<uint64_t>(std::strtoull(argv[++i], nullptr, 10));
+        } else if (std::strcmp(argv[i], "--agones") == 0) {
+            agones_enabled = true;
+        } else if (std::strcmp(argv[i], "--empty-grace") == 0 && i + 1 < argc) {
+            const char* arg = argv[++i];
+            const char* arg_end = arg + std::strlen(arg);
+            uint32_t seconds = 0;
+            const auto [parsed_end, ec] = std::from_chars(arg, arg_end, seconds);
+            if (ec != std::errc{} || parsed_end != arg_end || seconds < 1 || seconds > kMaxEmptyGraceSec) {
+                std::fprintf(stderr, "Fatal: --empty-grace expects whole seconds in [1, %u], got '%s'\n", kMaxEmptyGraceSec, arg);
+                return 1;
+            }
+            agones_config.empty_grace = std::chrono::seconds{seconds};
         }
     }
 
@@ -185,6 +211,7 @@ int main(int argc, char* argv[]) {
                 engine::kTickDurationNs.count() / 1'000'000.0,
                 bind_port);
     std::printf(" Prometheus Exporter: http://0.0.0.0:%u/metrics\n", metrics_port);
+    std::printf(" Agones SDK: %s\n", agones_enabled ? "enabled" : "disabled");
     if (benchmark_seconds > 0) {
         std::printf(" Benchmark Mode: Running for %llu seconds (%llu ticks)...\n",
                     static_cast<unsigned long long>(benchmark_seconds),
@@ -201,8 +228,18 @@ int main(int argc, char* argv[]) {
         std::fprintf(stderr, "Warning: Failed to bind Prometheus metrics server on port %u\n", metrics_port);
     }
 
+    if (agones_enabled && !context.agones.Start(agones_config)) {
+        std::fprintf(stderr, "Fatal: Failed to start Agones SDK control plane\n");
+        context.metrics_server.Stop();
+        context.net_server.Shutdown();
+        return 1;
+    }
+
     const uint64_t max_ticks = benchmark_seconds * engine::kTickRate;
     context.tick_loop.Run(AuthoritativeTick, &context, max_ticks);
+
+    // Agones Shutdown() before UDP teardown
+    context.agones.Stop();
 
     const auto& telem = context.tick_loop.GetTelemetry();
     const auto& lag_telem = context.lag_comp.GetTelemetry();

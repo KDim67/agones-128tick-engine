@@ -40,6 +40,7 @@ public:
 
 private:
     std::atomic<bool> is_running_{false};
+    std::atomic<bool> stop_requested_{false};
     TickTelemetry telemetry_{};
     TimePoint last_stats_time_{};
     uint64_t stats_tick_anchor_{0};
