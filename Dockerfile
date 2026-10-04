@@ -54,6 +54,7 @@ COPY CMakeLists.txt .
 COPY include include
 COPY src src
 COPY tests tests
+COPY tools/loadgen tools/loadgen
 # FetchContent cache: source edits do not re-clone ENet
 RUN --mount=type=cache,id=engine-fetchcontent,target=/src/build/_deps \
     cmake -S . -B build -G Ninja \
@@ -62,7 +63,18 @@ RUN --mount=type=cache,id=engine-fetchcontent,target=/src/build/_deps \
       -DENGINE_WITH_AGONES=ON \
  && cmake --build build \
  && ctest --test-dir build --output-on-failure \
- && cmake --install build --strip --prefix /out --component runtime
+ && cmake --install build --strip --prefix /out --component runtime \
+ && cmake --install build --strip --prefix /out-bench --component bench
+
+# Benchmark harness: servers, bots and netem share one loopback; run with --cap-add NET_ADMIN
+FROM debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a AS bench
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends iproute2 \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=build /out-bench/bin/ /opt/bench/bin/
+COPY --chmod=0755 tools/netem/impair.sh tools/bench/run_benchmark.sh /opt/bench/
+ENV BIN_DIR=/opt/bench/bin REPORT_DIR=/reports
+ENTRYPOINT ["/opt/bench/run_benchmark.sh"]
 
 FROM gcr.io/distroless/cc-debian13:nonroot@sha256:e792ab3d241a468a4fd7519ddbbebe66b49b5f365771716ea688ad40b6c6f1c2 AS runtime
 LABEL org.opencontainers.image.source="https://github.com/KDim67/agones-128tick-engine"

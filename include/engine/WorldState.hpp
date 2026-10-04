@@ -47,6 +47,9 @@ struct PlayerEntity {
     float view_pitch{0.0f};
     float view_yaw{0.0f};
     uint32_t last_applied_input_seq{0};
+    uint32_t respawn_tick{0};
+    // Bumped on every spawn and respawn; a rewind never reaches across it
+    uint32_t spawn_id{0};
 
     [[nodiscard]] bool IsAlive() const noexcept { return (flags & EntityFlag_Alive) != 0 && health > 0; }
     [[nodiscard]] bool IsGrounded() const noexcept { return (flags & EntityFlag_Grounded) != 0; }
@@ -98,6 +101,13 @@ public:
 
     void SpawnPlayer(uint32_t slot_id, const Vec3& spawn_position) noexcept;
     void DespawnPlayer(uint32_t slot_id) noexcept;
+
+    // Dead players respawn at their slot spawn point kRespawnDelayTicks after death
+    void ProcessRespawns(uint32_t current_tick) noexcept;
+
+    [[nodiscard]] static constexpr Vec3 SpawnPoint(uint32_t slot_id) noexcept {
+        return {static_cast<float>(slot_id * 4) - 16.0f, 0.0f, 0.0f};
+    }
 
     void IntegratePlayerInput(uint32_t slot_id, const ClientInputPayload& input, double dt) noexcept;
     [[nodiscard]] bool RaycastWorld(const Ray& ray, float max_dist, float& out_hit_dist) const noexcept;

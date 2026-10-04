@@ -33,10 +33,19 @@ constexpr double kFixedDeltaTimeSec = 1.0 / static_cast<double>(kTickRate);
 constexpr std::chrono::nanoseconds kSleepThresholdNs{1'500'000};
 constexpr uint32_t kMaxCatchupTicks = 4;
 
-constexpr uint8_t kProtocolVersion = 1;
+constexpr uint8_t kProtocolVersion = 2;
 constexpr size_t kMaxPlayers = 10;
 constexpr size_t kMaxInputQueuePerClient = 64;
-constexpr size_t kMaxInputsPerTick = 4;
+// Bucket depth spans the input window so a held uplink drains; the per-tick cap bounds the catch-up burst
+constexpr uint32_t kInputBurstTokens = static_cast<uint32_t>(kMaxInputQueuePerClient);
+constexpr uint32_t kMaxInputsPerTick = 4;
+constexpr uint32_t kInputHoleWaitTicks = 8;
+constexpr size_t kInputRedundancy = 4;
+constexpr uint32_t kMaxInterpSpanTicks = 8;
+constexpr uint32_t kMaxInterpDelayTicks = 24;
+// Rewind reach beyond RTT plus interpolation: hole wait and queueing slack, not backtracking
+constexpr uint32_t kRewindToleranceTicks = 16;
+constexpr uint32_t kRespawnDelayTicks = 2 * kTickRate;
 constexpr uint32_t kClientTimeoutMs = 5000;
 constexpr size_t kMaxMtuPayload = 1200;
 
@@ -73,6 +82,10 @@ inline bool ValidateAndClampViewAngles(float& pitch, float& yaw) noexcept {
     yaw = std::fmod(yaw, 360.0f);
     if (yaw < 0.0f) {
         yaw += 360.0f;
+    }
+    // Tiny negative yaw rounds up to 360; fold it so a second pass is a no-op
+    if (yaw >= 360.0f) {
+        yaw = 0.0f;
     }
     return true;
 }

@@ -73,6 +73,8 @@ struct AABB {
         return {center - half_extents, center + half_extents};
     }
 
+    [[nodiscard]] constexpr Vec3 Center() const noexcept { return (min + max) * 0.5f; }
+
     // Branchless slab intersection test returning hit boolean and entry distance
     [[nodiscard]] bool IntersectsRay(const Ray& ray, float max_dist, float& out_hit_dist) const noexcept {
         float tmin = 0.0f;
@@ -134,6 +136,13 @@ inline Vec3 AnglesToDirection(float pitch_deg, float yaw_deg) noexcept {
         -std::sin(pitch_rad),
         std::cos(yaw_rad) * cos_pitch
     };
+}
+
+// Inverse of AnglesToDirection for a normalized direction
+inline void DirectionToAngles(const Vec3& direction, float& pitch_deg, float& yaw_deg) noexcept {
+    constexpr float kRadToDeg = 180.0f / 3.14159265358979323846f;
+    yaw_deg = std::atan2(direction.x, direction.z) * kRadToDeg;
+    pitch_deg = -std::asin(std::clamp(direction.y, -1.0f, 1.0f)) * kRadToDeg;
 }
 
 } // namespace engine

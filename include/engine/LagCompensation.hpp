@@ -9,6 +9,8 @@
 
 namespace engine {
 
+constexpr float kMaxShotRange = 100.0f;
+
 struct HitResult {
     bool hit{false};
     bool occluded{false};
@@ -20,6 +22,8 @@ struct HitResult {
     HitZone hit_zone{HitZone::None};
     uint16_t damage{0};
     bool killed{false};
+    // Bit per slot that was a live, same-life target at the rewound tick
+    uint16_t target_mask{0};
 };
 
 struct LagCompensationTelemetry {
@@ -33,19 +37,27 @@ struct LagCompensationTelemetry {
     int64_t last_rewind_duration_ns{0};
 };
 
+// Closest hitbox along the ray, clipped by world geometry; no damage applied
+[[nodiscard]] HitResult TraceShot(const WorldState& world, const std::array<PlayerEntity, kMaxPlayers>& targets,
+                                  uint32_t shooter_slot, const Ray& ray, float max_range) noexcept;
+
 class LagCompensationManager {
 public:
     constexpr LagCompensationManager() noexcept = default;
 
+    // Rewinds older than oldest_tick are rejected as backtracking
     HitResult ProcessShot(WorldState& world, const HistoryBuffer& history,
                           uint32_t shooter_slot, uint32_t target_tick,
                           float sub_tick_fraction = 0.0f,
-                          float max_range = 100.0f) noexcept;
+                          uint32_t interp_span_ticks = 1,
+                          uint32_t oldest_tick = 0,
+                          float max_range = kMaxShotRange) noexcept;
 
     [[nodiscard]] const LagCompensationTelemetry& GetTelemetry() const noexcept { return telemetry_; }
 
 private:
-    std::array<PlayerEntity, kMaxPlayers> backup_players_{};
+    WorldSnapshot historical_snapshot_{};
+    std::array<PlayerEntity, kMaxPlayers> rewound_players_{};
     LagCompensationTelemetry telemetry_{};
 };
 

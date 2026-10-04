@@ -6,7 +6,8 @@ namespace engine {
 
 Metrics::Metrics() noexcept {
     for (size_t i = 0; i < kHistogramBucketCount; ++i) {
-        histogram_buckets_[i].store(0, std::memory_order_relaxed);
+        tick_duration_.buckets[i].store(0, std::memory_order_relaxed);
+        tick_lateness_.buckets[i].store(0, std::memory_order_relaxed);
     }
 }
 
@@ -19,16 +20,10 @@ void Metrics::RecordTick(int64_t duration_us, int64_t jitter_us, bool overrun) n
     last_tick_duration_us_.store(duration_us, std::memory_order_relaxed);
     last_tick_jitter_us_.store(jitter_us, std::memory_order_relaxed);
 
-    histogram_sum_us_.fetch_add(duration_us, std::memory_order_relaxed);
-    histogram_count_.fetch_add(1, std::memory_order_relaxed);
+    tick_duration_.Observe(duration_us);
 
-    // Cumulative histogram bucket distribution
-    for (size_t i = 0; i < kHistogramBucketCount; ++i) {
-        if (duration_us <= kHistogramBuckets[i]) {
-            histogram_buckets_[i].fetch_add(1, std::memory_order_relaxed);
-        }
-    }
-    histogram_inf_bucket_.fetch_add(1, std::memory_order_relaxed);
+    // Early starts clamp to zero lateness
+    tick_lateness_.Observe(jitter_us > 0 ? jitter_us : 0);
 }
 
 void Metrics::RecordCombat(bool shot, bool hit, bool occluded, bool rejected) noexcept {
@@ -44,6 +39,19 @@ void Metrics::SetActivePlayers(uint32_t count) noexcept {
 
 void Metrics::SetGameServerState(GameServerState state) noexcept {
     gameserver_state_.store(static_cast<uint8_t>(state), std::memory_order_relaxed);
+}
+
+void Metrics::SetInputBacklogPeak(uint32_t depth) noexcept {
+    input_backlog_peak_.store(depth, std::memory_order_relaxed);
+}
+
+void Metrics::SetInputCounters(uint64_t accepted, uint64_t missed, uint64_t redundant,
+                               uint64_t overflow, uint64_t malformed) noexcept {
+    inputs_accepted_.store(accepted, std::memory_order_relaxed);
+    inputs_missed_.store(missed, std::memory_order_relaxed);
+    inputs_redundant_.store(redundant, std::memory_order_relaxed);
+    inputs_overflow_.store(overflow, std::memory_order_relaxed);
+    packets_malformed_.store(malformed, std::memory_order_relaxed);
 }
 
 size_t Metrics::Serialize(char* out_buffer, size_t max_bytes) const noexcept {
@@ -63,23 +71,34 @@ size_t Metrics::Serialize(char* out_buffer, size_t max_bytes) const noexcept {
         }
     };
 
-    append("# HELP game_tick_duration_us 128Hz tick execution duration in microseconds\n");
-    append("# TYPE game_tick_duration_us histogram\n");
-    for (size_t i = 0; i < kHistogramBucketCount; ++i) {
-        append("game_tick_duration_us_bucket{le=\"%lld\"} %llu\n",
-               static_cast<long long>(kHistogramBuckets[i]),
-               static_cast<unsigned long long>(histogram_buckets_[i].load(std::memory_order_relaxed)));
-    }
-    append("game_tick_duration_us_bucket{le=\"+Inf\"} %llu\n",
-           static_cast<unsigned long long>(histogram_inf_bucket_.load(std::memory_order_relaxed)));
-    append("game_tick_duration_us_sum %lld\n",
-           static_cast<long long>(histogram_sum_us_.load(std::memory_order_relaxed)));
-    append("game_tick_duration_us_count %llu\n",
-           static_cast<unsigned long long>(histogram_count_.load(std::memory_order_relaxed)));
+    auto append_histogram = [&](const char* name, const char* help, const LatencyHistogram& histogram) {
+        append("# HELP %s %s\n", name, help);
+        append("# TYPE %s histogram\n", name);
+        for (size_t i = 0; i < kHistogramBucketCount; ++i) {
+            append("%s_bucket{le=\"%lld\"} %llu\n", name,
+                   static_cast<long long>(kHistogramBuckets[i]),
+                   static_cast<unsigned long long>(histogram.buckets[i].load(std::memory_order_relaxed)));
+        }
+        append("%s_bucket{le=\"+Inf\"} %llu\n", name,
+               static_cast<unsigned long long>(histogram.inf_bucket.load(std::memory_order_relaxed)));
+        append("%s_sum %lld\n", name,
+               static_cast<long long>(histogram.sum_us.load(std::memory_order_relaxed)));
+        append("%s_count %llu\n", name,
+               static_cast<unsigned long long>(histogram.count.load(std::memory_order_relaxed)));
+    };
+
+    append_histogram("game_tick_duration_us", "128Hz tick execution duration in microseconds", tick_duration_);
+    append_histogram("game_tick_lateness_us", "Tick start lateness behind its scheduled deadline in microseconds", tick_lateness_);
 
     append("# HELP game_active_players Currently connected players\n");
     append("# TYPE game_active_players gauge\n");
     append("game_active_players %u\n", active_players_.load(std::memory_order_relaxed));
+
+    // Server-side clock so rate math is immune to scrape latency
+    append("# HELP game_uptime_seconds Seconds since the metrics registry was created\n");
+    append("# TYPE game_uptime_seconds gauge\n");
+    append("game_uptime_seconds %.6f\n",
+           std::chrono::duration<double>(std::chrono::steady_clock::now() - start_time_).count());
 
     append("# HELP game_total_ticks Monotonically increasing tick counter\n");
     append("# TYPE game_total_ticks counter\n");
@@ -115,6 +134,26 @@ size_t Metrics::Serialize(char* out_buffer, size_t max_bytes) const noexcept {
     append("# TYPE game_rejected_rewinds counter\n");
     append("game_rejected_rewinds %llu\n",
            static_cast<unsigned long long>(rejected_rewinds_.load(std::memory_order_relaxed)));
+
+    append("# HELP game_client_inputs Client inputs by ingest outcome\n");
+    append("# TYPE game_client_inputs counter\n");
+    append("game_client_inputs{outcome=\"accepted\"} %llu\n",
+           static_cast<unsigned long long>(inputs_accepted_.load(std::memory_order_relaxed)));
+    append("game_client_inputs{outcome=\"missed\"} %llu\n",
+           static_cast<unsigned long long>(inputs_missed_.load(std::memory_order_relaxed)));
+    append("game_client_inputs{outcome=\"redundant\"} %llu\n",
+           static_cast<unsigned long long>(inputs_redundant_.load(std::memory_order_relaxed)));
+    append("game_client_inputs{outcome=\"overflow\"} %llu\n",
+           static_cast<unsigned long long>(inputs_overflow_.load(std::memory_order_relaxed)));
+
+    append("# HELP game_input_backlog_peak Deepest per-session input reorder backlog over the last second, in ticks\n");
+    append("# TYPE game_input_backlog_peak gauge\n");
+    append("game_input_backlog_peak %u\n", input_backlog_peak_.load(std::memory_order_relaxed));
+
+    append("# HELP game_malformed_packets Packets rejected for version, framing or field validation\n");
+    append("# TYPE game_malformed_packets counter\n");
+    append("game_malformed_packets %llu\n",
+           static_cast<unsigned long long>(packets_malformed_.load(std::memory_order_relaxed)));
 
     // Stateset: one series per state, active at 1
     append("# HELP game_agones_state Agones GameServer lifecycle state reported by the SDK sidecar\n");

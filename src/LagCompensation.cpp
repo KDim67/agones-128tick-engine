@@ -1,113 +1,111 @@
 #include "engine/LagCompensation.hpp"
 #include <chrono>
-#include <algorithm>
 
 namespace engine {
 
-HitResult LagCompensationManager::ProcessShot(WorldState& world, const HistoryBuffer& history,
-                                              uint32_t shooter_slot, uint32_t target_tick,
-                                              float sub_tick_fraction, float max_range) noexcept {
-    const auto start_time = std::chrono::steady_clock::now();
+HitResult TraceShot(const WorldState& world, const std::array<PlayerEntity, kMaxPlayers>& targets,
+                    uint32_t shooter_slot, const Ray& ray, float max_range) noexcept {
     HitResult result{};
-
-    auto* shooter = world.GetPlayer(shooter_slot);
-    if (!shooter || !shooter->IsAlive()) {
-        return result;
-    }
-
-    if (!history.IsTickValid(target_tick)) {
-        result.rejected = true;
-        ++telemetry_.rejected_rewinds;
-        return result;
-    }
-
-    // Interpolate continuous target tick
-    const float continuous_tick = static_cast<float>(target_tick) + std::clamp(sub_tick_fraction, 0.0f, 0.999f);
-    WorldSnapshot historical_snapshot;
-    if (!history.GetInterpolatedSnapshot(continuous_tick, historical_snapshot)) {
-        result.rejected = true;
-        ++telemetry_.rejected_rewinds;
-        return result;
-    }
-
-    result.fired = true;
-    ++telemetry_.total_shots;
-
-    const Vec3 eye_pos = shooter->GetEyePosition();
-    const Vec3 view_dir = AnglesToDirection(shooter->view_pitch, shooter->view_yaw);
-    const Ray shot_ray{eye_pos, view_dir};
 
     // World obstacle occlusion check
     float world_hit_dist = max_range;
-    const bool world_occluded = world.RaycastWorld(shot_ray, max_range, world_hit_dist);
+    const bool world_occluded = world.RaycastWorld(ray, max_range, world_hit_dist);
     float closest_hit_dist = world_occluded ? world_hit_dist : max_range;
 
-    auto& live_players = world.GetPlayers();
-
-    // Rewind opponent transforms
-    for (size_t i = 0; i < kMaxPlayers; ++i) {
-        backup_players_[i] = live_players[i];
-
-        if (live_players[i].slot_id != shooter_slot && live_players[i].is_active) {
-            const auto& historical_entity = historical_snapshot.players[i];
-            if (historical_entity.is_active) {
-                live_players[i].position = historical_entity.position;
-                live_players[i].flags = historical_entity.flags;
-            }
-        }
-    }
-
-    for (const auto& target : live_players) {
+    for (const auto& target : targets) {
         if (target.slot_id == shooter_slot || !target.is_active || !target.IsAlive()) {
             continue;
         }
+        result.target_mask = static_cast<uint16_t>(result.target_mask | (1u << target.slot_id));
 
         float broad_dist = 0.0f;
-        if (!target.GetBoundingBox().IntersectsRay(shot_ray, closest_hit_dist, broad_dist)) {
+        if (!target.GetBoundingBox().IntersectsRay(ray, closest_hit_dist, broad_dist)) {
             continue;
         }
 
         // Head (150 dmg)
         float head_dist = 0.0f;
-        if (target.GetHeadHitbox().IntersectsRay(shot_ray, closest_hit_dist, head_dist)) {
+        if (target.GetHeadHitbox().IntersectsRay(ray, closest_hit_dist, head_dist)) {
             closest_hit_dist = head_dist;
             result.hit = true;
             result.victim_slot = target.slot_id;
             result.hit_distance = head_dist;
-            result.hit_position = shot_ray.origin + shot_ray.direction * head_dist;
+            result.hit_position = ray.origin + ray.direction * head_dist;
             result.hit_zone = HitZone::Head;
             result.damage = 150;
         }
 
         // Torso (40 dmg)
         float torso_dist = 0.0f;
-        if (target.GetTorsoHitbox().IntersectsRay(shot_ray, closest_hit_dist, torso_dist)) {
+        if (target.GetTorsoHitbox().IntersectsRay(ray, closest_hit_dist, torso_dist)) {
             closest_hit_dist = torso_dist;
             result.hit = true;
             result.victim_slot = target.slot_id;
             result.hit_distance = torso_dist;
-            result.hit_position = shot_ray.origin + shot_ray.direction * torso_dist;
+            result.hit_position = ray.origin + ray.direction * torso_dist;
             result.hit_zone = HitZone::Torso;
             result.damage = 40;
         }
 
         // Legs (30 dmg)
         float legs_dist = 0.0f;
-        if (target.GetLegsHitbox().IntersectsRay(shot_ray, closest_hit_dist, legs_dist)) {
+        if (target.GetLegsHitbox().IntersectsRay(ray, closest_hit_dist, legs_dist)) {
             closest_hit_dist = legs_dist;
             result.hit = true;
             result.victim_slot = target.slot_id;
             result.hit_distance = legs_dist;
-            result.hit_position = shot_ray.origin + shot_ray.direction * legs_dist;
+            result.hit_position = ray.origin + ray.direction * legs_dist;
             result.hit_zone = HitZone::Legs;
             result.damage = 30;
         }
     }
 
-    // Restore live transforms
-    for (size_t i = 0; i < kMaxPlayers; ++i) {
-        live_players[i] = backup_players_[i];
+    result.occluded = !result.hit && world_occluded;
+    return result;
+}
+
+HitResult LagCompensationManager::ProcessShot(WorldState& world, const HistoryBuffer& history,
+                                              uint32_t shooter_slot, uint32_t target_tick,
+                                              float sub_tick_fraction, uint32_t interp_span_ticks,
+                                              uint32_t oldest_tick, float max_range) noexcept {
+    const auto start_time = std::chrono::steady_clock::now();
+
+    auto* shooter = world.GetPlayer(shooter_slot);
+    if (!shooter || !shooter->IsAlive()) {
+        return HitResult{};
     }
+
+    if (target_tick < oldest_tick || interp_span_ticks > kMaxInterpSpanTicks ||
+        !history.GetInterpolatedSnapshot(target_tick, interp_span_ticks, SanitizeSubTickAlpha(sub_tick_fraction), historical_snapshot_)) {
+        HitResult rejected{};
+        rejected.rejected = true;
+        ++telemetry_.rejected_rewinds;
+        return rejected;
+    }
+
+    // Rewind opponent transforms into scratch; live world untouched
+    const auto& live_players = world.GetPlayers();
+    for (size_t i = 0; i < kMaxPlayers; ++i) {
+        const auto& live = live_players[i];
+        const auto& historical = historical_snapshot_.players[i];
+        rewound_players_[i] = live;
+        if (live.slot_id == shooter_slot) {
+            continue;
+        }
+
+        // Joins, reconnects and respawns after the rewound tick were not there to be hit
+        if (historical.is_active && historical.spawn_id == live.spawn_id) {
+            rewound_players_[i].position = historical.position;
+            rewound_players_[i].flags = historical.flags;
+        } else {
+            rewound_players_[i].is_active = false;
+        }
+    }
+
+    const Ray shot_ray{shooter->GetEyePosition(), AnglesToDirection(shooter->view_pitch, shooter->view_yaw)};
+    HitResult result = TraceShot(world, rewound_players_, shooter_slot, shot_ray, max_range);
+    result.fired = true;
+    ++telemetry_.total_shots;
 
     if (result.hit) {
         ++telemetry_.registered_hits;
@@ -119,8 +117,7 @@ HitResult LagCompensationManager::ProcessShot(WorldState& world, const HistoryBu
         if (live_victim) {
             result.killed = live_victim->TakeDamage(result.damage);
         }
-    } else if (world_occluded) {
-        result.occluded = true;
+    } else if (result.occluded) {
         ++telemetry_.occluded_shots;
     }
 

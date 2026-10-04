@@ -27,6 +27,31 @@ void WorldState::SpawnPlayer(uint32_t slot_id, const Vec3& spawn_position) noexc
     p.view_pitch = 0.0f;
     p.view_yaw = 0.0f;
     p.last_applied_input_seq = 0;
+    p.respawn_tick = 0;
+    ++p.spawn_id;
+}
+
+void WorldState::ProcessRespawns(uint32_t current_tick) noexcept {
+    for (auto& p : players_) {
+        if (!p.is_active || p.IsAlive()) {
+            continue;
+        }
+
+        if (p.respawn_tick == 0) {
+            p.respawn_tick = current_tick + kRespawnDelayTicks;
+            continue;
+        }
+
+        if (current_tick >= p.respawn_tick) {
+            // Input sequence and view survive so client acks stay monotonic
+            p.flags = EntityFlag_Alive | EntityFlag_Grounded;
+            p.health = 100;
+            p.position = SpawnPoint(p.slot_id);
+            p.velocity = Vec3{0.0f, 0.0f, 0.0f};
+            p.respawn_tick = 0;
+            ++p.spawn_id;
+        }
+    }
 }
 
 void WorldState::DespawnPlayer(uint32_t slot_id) noexcept {
@@ -75,13 +100,18 @@ void WorldState::IntegratePlayerInput(uint32_t slot_id, const ClientInputPayload
     }
 
     auto& p = players_[slot_id];
-    if (!p.is_active || !p.IsAlive()) {
+    if (!p.is_active) {
+        return;
+    }
+
+    // Consumed inputs are acked while dead so client reconciliation never stalls
+    p.last_applied_input_seq = input.sequence;
+    if (!p.IsAlive()) {
         return;
     }
 
     p.view_pitch = input.view_pitch;
     p.view_yaw = input.view_yaw;
-    p.last_applied_input_seq = input.sequence;
 
     if (input.input_flags & InputFlag_Crouch) {
         p.flags |= EntityFlag_Crouching;

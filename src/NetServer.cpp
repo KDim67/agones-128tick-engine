@@ -1,6 +1,5 @@
 #include "engine/NetServer.hpp"
 #include <cstring>
-#include <cstdio>
 
 namespace engine {
 
@@ -55,8 +54,21 @@ void NetServer::PollEvents(uint32_t current_tick) noexcept {
 
     current_tick_ = current_tick;
 
+    // Wall-clock input credit; a stalled server owes clients the ticks it skipped
+    const auto now = std::chrono::steady_clock::now();
+    uint32_t credit = 1;
+    if (last_poll_ != std::chrono::steady_clock::time_point{}) {
+        constexpr auto kMaxCarry = kTickDurationNs * static_cast<int64_t>(kInputBurstTokens);
+        credit_carry_ = std::min(credit_carry_ + (now - last_poll_), kMaxCarry);
+        credit = static_cast<uint32_t>(credit_carry_ / kTickDurationNs);
+        credit_carry_ -= kTickDurationNs * static_cast<int64_t>(credit);
+    }
+    last_poll_ = now;
+
     for (auto& session : sessions_) {
-        session.inputs_this_tick = 0;
+        if (session.state == SessionState::Connected) {
+            session.inputs.Refill(credit);
+        }
     }
 
     ENetEvent event;
@@ -85,8 +97,9 @@ void NetServer::PollEvents(uint32_t current_tick) noexcept {
 void NetServer::CheckTimeouts() noexcept {
     const auto now = std::chrono::steady_clock::now();
 
+    // Stalled handshakes time out too, so a silent peer cannot squat a slot
     for (auto& session : sessions_) {
-        if (session.state == SessionState::Connected && session.peer) {
+        if (session.state != SessionState::Disconnected && session.peer) {
             const auto idle_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - session.last_activity).count();
             if (idle_ms >= static_cast<int64_t>(kClientTimeoutMs)) {
                 enet_peer_disconnect_later(session.peer, 0);
@@ -101,12 +114,9 @@ void NetServer::HandleConnect(ENetPeer* peer) noexcept {
         if (session.state == SessionState::Disconnected) {
             session.state = SessionState::Connecting;
             session.peer = peer;
-            session.input_queue.count = 0;
-            session.input_queue.read_idx = 0;
-            session.input_queue.write_idx = 0;
+            session.inputs.Reset();
+            session.spawn_pending = false;
             session.last_activity = std::chrono::steady_clock::now();
-            session.last_input_sequence = 0;
-            session.last_ack_tick = 0;
             peer->data = &session;
             return;
         }
@@ -128,6 +138,7 @@ void NetServer::HandleDisconnect(ENetPeer* peer) noexcept {
 
 void NetServer::HandlePacket(ENetPeer* peer, const uint8_t* data, size_t length) noexcept {
     if (length < sizeof(PacketHeader)) {
+        ++telemetry_.packets_malformed;
         return;
     }
 
@@ -135,6 +146,7 @@ void NetServer::HandlePacket(ENetPeer* peer, const uint8_t* data, size_t length)
     std::memcpy(&header, data, sizeof(PacketHeader));
 
     if (header.protocol_version != kProtocolVersion) {
+        ++telemetry_.packets_malformed;
         return;
     }
 
@@ -155,6 +167,7 @@ void NetServer::HandlePacket(ENetPeer* peer, const uint8_t* data, size_t length)
 
         if (session->state == SessionState::Connecting) {
             session->state = SessionState::Connected;
+            session->spawn_pending = true;
             session->last_activity = std::chrono::steady_clock::now();
             ++active_players_;
 
@@ -173,35 +186,73 @@ void NetServer::HandlePacket(ENetPeer* peer, const uint8_t* data, size_t length)
             return;
         }
 
-        if (header.payload_bytes != sizeof(ClientInputPayload) || length < (sizeof(PacketHeader) + sizeof(ClientInputPayload))) {
+        const size_t payload_bytes = length - sizeof(PacketHeader);
+        const size_t count = (header.payload_bytes == payload_bytes)
+            ? DecodeInputBatch(data + sizeof(PacketHeader), payload_bytes, input_batch_)
+            : 0;
+        if (count == 0) {
+            ++telemetry_.packets_malformed;
             return;
         }
 
-        if (session->inputs_this_tick >= kMaxInputsPerTick) {
-            return;
-        }
+        // Any arrival order; copies of buffered or consumed inputs are redundancy, not loss
+        for (size_t k = 0; k < count; ++k) {
+            ClientInputPayload& input = input_batch_[k];
+            if (!std::isfinite(input.sub_tick_fraction) || input.interp_span_ticks > kMaxInterpSpanTicks ||
+                !ValidateAndClampViewAngles(input.view_pitch, input.view_yaw)) {
+                ++telemetry_.packets_malformed;
+                return;
+            }
 
-        ClientInputPayload input;
-        std::memcpy(&input, data + sizeof(PacketHeader), sizeof(ClientInputPayload));
-
-        if (!ValidateAndClampViewAngles(input.view_pitch, input.view_yaw)) {
-            return;
-        }
-
-        // Drop out-of-order or duplicate sequences
-        if (input.sequence > session->last_input_sequence) {
-            session->last_input_sequence = input.sequence;
-            session->last_ack_tick = input.ack_tick;
-            session->last_activity = std::chrono::steady_clock::now();
-            ++session->inputs_this_tick;
-            session->input_queue.Push(input);
+            InputLoss loss{};
+            if (session->inputs.Insert(input, loss) == InputInsert::Accepted) {
+                ++telemetry_.inputs_accepted;
+                session->last_activity = std::chrono::steady_clock::now();
+            } else {
+                ++telemetry_.inputs_redundant;
+            }
+            telemetry_.inputs_missed += loss.missed;
+            telemetry_.inputs_overflow += loss.overflow;
         }
         return;
     }
 
+    // Release the ENet peer as well, or a goodbye leaves the link holding a host slot
     if (packet_type == PacketType::Disconnect) {
+        enet_peer_disconnect_later(peer, 0);
         HandleDisconnect(peer);
     }
+}
+
+bool NetServer::PopInput(uint32_t slot_id, ClientInputPayload& out_input) noexcept {
+    if (slot_id >= kMaxPlayers || sessions_[slot_id].state != SessionState::Connected) {
+        return false;
+    }
+
+    auto& inputs = sessions_[slot_id].inputs;
+    input_backlog_peak_ = std::max(input_backlog_peak_, inputs.Depth());
+
+    InputLoss loss{};
+    const bool popped = inputs.Pop(current_tick_, out_input, loss);
+    telemetry_.inputs_missed += loss.missed;
+    return popped;
+}
+
+bool NetServer::TakeSpawnRequest(uint32_t slot_id) noexcept {
+    if (slot_id >= kMaxPlayers || !sessions_[slot_id].spawn_pending) {
+        return false;
+    }
+    sessions_[slot_id].spawn_pending = false;
+    return true;
+}
+
+uint32_t NetServer::RoundTripTicks(uint32_t slot_id) const noexcept {
+    if (slot_id >= kMaxPlayers || !sessions_[slot_id].peer) {
+        return 0;
+    }
+    const ENetPeer* peer = sessions_[slot_id].peer;
+    const uint64_t rtt_ms = static_cast<uint64_t>(peer->roundTripTime) + 4ull * peer->roundTripTimeVariance;
+    return static_cast<uint32_t>(std::min<uint64_t>((rtt_ms * kTickRate + 999) / 1000, UINT32_MAX));
 }
 
 void NetServer::SendPacket(uint32_t slot_id, PacketType type, const void* payload, size_t payload_bytes, bool reliable) noexcept {

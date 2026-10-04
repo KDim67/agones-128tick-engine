@@ -57,27 +57,49 @@ void AuthoritativeTick(uint64_t tick_index, double dt, void* user_data) {
         auto& session = sessions[i];
 
         if (session.state == engine::SessionState::Connected) {
-            if (!ctx->world_state.GetPlayer(session.slot_id)) {
-                const float spawn_x = static_cast<float>(session.slot_id * 4) - 16.0f;
-                ctx->world_state.SpawnPlayer(session.slot_id, engine::Vec3{spawn_x, 0.0f, 0.0f});
+            // Fresh entity per handshake; a slot reused within one poll must not inherit the previous occupant
+            if (ctx->net_server.TakeSpawnRequest(session.slot_id)) {
+                ctx->world_state.SpawnPlayer(session.slot_id, engine::WorldState::SpawnPoint(session.slot_id));
             }
 
+            // Rewinds older than RTT plus the interpolation allowance are backtracking, not lag
+            const uint32_t max_rewind = ctx->net_server.RoundTripTicks(session.slot_id) +
+                                        engine::kMaxInterpDelayTicks + engine::kRewindToleranceTicks;
+            const uint32_t oldest_tick = current_tick > max_rewind ? current_tick - max_rewind : 0;
+
             engine::ClientInputPayload input;
-            while (session.input_queue.Pop(input)) {
+            while (ctx->net_server.PopInput(session.slot_id, input)) {
                 ctx->world_state.IntegratePlayerInput(session.slot_id, input, dt);
 
                 if (input.input_flags & engine::InputFlag_Fire) {
                     const auto hit = ctx->lag_comp.ProcessShot(
-                        ctx->world_state, ctx->history_buffer,
-                        session.slot_id, input.ack_tick, input.sub_tick_fraction);
+                        ctx->world_state, ctx->history_buffer, session.slot_id, input.ack_tick,
+                        input.sub_tick_fraction, input.interp_span_ticks, oldest_tick);
 
                     ctx->metrics.RecordCombat(hit.fired, hit.hit, hit.occluded, hit.rejected);
+
+                    const engine::ShotStatus status = hit.rejected ? engine::ShotStatus::Rejected
+                        : !hit.fired ? engine::ShotStatus::ShooterDead
+                        : hit.hit    ? engine::ShotStatus::Hit
+                                     : engine::ShotStatus::Miss;
+                    const engine::ShotResultPayload result{
+                        .input_sequence = input.sequence,
+                        .server_tick = current_tick,
+                        .victim_slot = hit.victim_slot,
+                        .hit_x = hit.hit_position.x,
+                        .hit_y = hit.hit_position.y,
+                        .hit_z = hit.hit_position.z,
+                        .target_mask = hit.target_mask,
+                        .status = static_cast<uint8_t>(status),
+                        .hit_zone = static_cast<uint8_t>(hit.hit_zone)
+                    };
+                    ctx->net_server.SendPacket(session.slot_id, engine::PacketType::ShotResult, &result, sizeof(result), true);
 
                     if (hit.hit) {
                         const auto* victim = ctx->world_state.GetPlayer(hit.victim_slot);
                         const uint8_t victim_hp = victim ? static_cast<uint8_t>(victim->health) : 0;
 
-                        engine::HitNotificationPayload notif{
+                        const engine::HitNotificationPayload notif{
                             .shooter_slot = session.slot_id,
                             .victim_slot = hit.victim_slot,
                             .server_tick = current_tick,
@@ -89,15 +111,17 @@ void AuthoritativeTick(uint64_t tick_index, double dt, void* user_data) {
                             .hit_zone = static_cast<uint8_t>(hit.hit_zone),
                             .victim_health = victim_hp
                         };
-                        ctx->net_server.SendPacket(session.slot_id, engine::PacketType::HitNotification, &notif, sizeof(notif), true);
                         ctx->net_server.SendPacket(hit.victim_slot, engine::PacketType::HitNotification, &notif, sizeof(notif), true);
                     }
                 }
             }
-        } else if (session.state == engine::SessionState::Disconnected) {
+        } else {
+            // Handshaking slots carry no entity, so a departed occupant cannot linger in snapshots
             ctx->world_state.DespawnPlayer(session.slot_id);
         }
     }
+
+    ctx->world_state.ProcessRespawns(current_tick);
 
     const uint64_t now_ns = static_cast<uint64_t>(tick_index * engine::kTickDurationNs.count());
     ctx->history_buffer.Record(current_tick, now_ns, ctx->world_state.GetPlayers());
@@ -118,6 +142,7 @@ void AuthoritativeTick(uint64_t tick_index, double dt, void* user_data) {
             ent.pitch = p.view_pitch;
             ent.yaw = p.view_yaw;
             ent.flags = p.flags;
+            ent.last_input_seq = p.last_applied_input_seq;
             ent.health = static_cast<uint8_t>(p.health);
             ent.reserved[0] = 0;
             ent.reserved[1] = 0;
@@ -142,6 +167,10 @@ void AuthoritativeTick(uint64_t tick_index, double dt, void* user_data) {
     // 1Hz Agones state sync and telemetry summary
     if (tick_index > 0 && (tick_index % engine::kTickRate) == 0) {
         ctx->metrics.SetGameServerState(ctx->agones.GetState());
+        const auto& net = ctx->net_server.GetTelemetry();
+        ctx->metrics.SetInputCounters(net.inputs_accepted, net.inputs_missed, net.inputs_redundant,
+                                      net.inputs_overflow, net.packets_malformed);
+        ctx->metrics.SetInputBacklogPeak(ctx->net_server.TakeInputBacklogPeak());
         if (ctx->agones.IsShutdownRequested()) {
             ctx->tick_loop.RequestStop();
         }
