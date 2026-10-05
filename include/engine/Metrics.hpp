@@ -59,6 +59,9 @@ public:
     // Deepest per-session input backlog over the last export interval
     void SetInputBacklogPeak(uint32_t depth) noexcept;
 
+    // Mirror the ENet block pool high-water mark and refused allocations
+    void SetNetPool(size_t peak_bytes, uint64_t failures) noexcept;
+
     // Serialize all registered metrics into Prometheus text format
     size_t Serialize(char* out_buffer, size_t max_bytes) const noexcept;
 
@@ -89,6 +92,8 @@ private:
     std::atomic<uint64_t> inputs_overflow_{0};
     std::atomic<uint64_t> packets_malformed_{0};
     std::atomic<uint32_t> input_backlog_peak_{0};
+    std::atomic<uint64_t> net_pool_peak_bytes_{0};
+    std::atomic<uint64_t> net_pool_failures_{0};
 };
 
 } // namespace engine

@@ -1,4 +1,5 @@
 #include "engine/NetServer.hpp"
+#include "engine/NetMemoryPool.hpp"
 #include <cstring>
 
 namespace engine {
@@ -16,7 +17,7 @@ NetServer::~NetServer() {
 }
 
 bool NetServer::Initialize(uint16_t bind_port) noexcept {
-    if (enet_initialize() != 0) {
+    if (!NetMemoryPool::Instance().InstallEnetCallbacks()) {
         return false;
     }
 
@@ -24,9 +25,16 @@ bool NetServer::Initialize(uint16_t bind_port) noexcept {
     address.host = ENET_HOST_ANY;
     address.port = bind_port;
 
-    // 2 channels: 0 for unsequenced state, 1 for reliable control
-    host_ = enet_host_create(&address, kMaxPlayers, 2, 0, 0);
-    return host_ != nullptr;
+    host_ = enet_host_create(&address, kMaxPlayers, kNetChannelCount, 0, 0);
+    if (!host_) {
+        enet_deinitialize();
+        return false;
+    }
+
+    // Defaults allow 32 MB reassembly per peer; every legitimate packet fits one datagram and one pool block
+    host_->maximumPacketSize = kMaxMtuPayload;
+    host_->maximumWaitingData = kMaxMtuPayload * kMaxInputQueuePerClient;
+    return true;
 }
 
 void NetServer::Shutdown() noexcept {

@@ -45,6 +45,11 @@ void Metrics::SetInputBacklogPeak(uint32_t depth) noexcept {
     input_backlog_peak_.store(depth, std::memory_order_relaxed);
 }
 
+void Metrics::SetNetPool(size_t peak_bytes, uint64_t failures) noexcept {
+    net_pool_peak_bytes_.store(peak_bytes, std::memory_order_relaxed);
+    net_pool_failures_.store(failures, std::memory_order_relaxed);
+}
+
 void Metrics::SetInputCounters(uint64_t accepted, uint64_t missed, uint64_t redundant,
                                uint64_t overflow, uint64_t malformed) noexcept {
     inputs_accepted_.store(accepted, std::memory_order_relaxed);
@@ -154,6 +159,16 @@ size_t Metrics::Serialize(char* out_buffer, size_t max_bytes) const noexcept {
     append("# TYPE game_malformed_packets counter\n");
     append("game_malformed_packets %llu\n",
            static_cast<unsigned long long>(packets_malformed_.load(std::memory_order_relaxed)));
+
+    append("# HELP game_net_pool_peak_bytes High-water mark of the preallocated ENet block pool\n");
+    append("# TYPE game_net_pool_peak_bytes gauge\n");
+    append("game_net_pool_peak_bytes %llu\n",
+           static_cast<unsigned long long>(net_pool_peak_bytes_.load(std::memory_order_relaxed)));
+
+    append("# HELP game_net_pool_failures ENet allocations the pool refused; each one drops a packet\n");
+    append("# TYPE game_net_pool_failures counter\n");
+    append("game_net_pool_failures %llu\n",
+           static_cast<unsigned long long>(net_pool_failures_.load(std::memory_order_relaxed)));
 
     // Stateset: one series per state, active at 1
     append("# HELP game_agones_state Agones GameServer lifecycle state reported by the SDK sidecar\n");

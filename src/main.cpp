@@ -5,6 +5,7 @@
 #include "engine/WorldState.hpp"
 #include "engine/HistoryBuffer.hpp"
 #include "engine/LagCompensation.hpp"
+#include "engine/NetMemoryPool.hpp"
 #include "engine/Metrics.hpp"
 #include "engine/MetricsServer.hpp"
 #include "engine/AgonesBridge.hpp"
@@ -171,6 +172,8 @@ void AuthoritativeTick(uint64_t tick_index, double dt, void* user_data) {
         ctx->metrics.SetInputCounters(net.inputs_accepted, net.inputs_missed, net.inputs_redundant,
                                       net.inputs_overflow, net.packets_malformed);
         ctx->metrics.SetInputBacklogPeak(ctx->net_server.TakeInputBacklogPeak());
+        const engine::NetMemoryStats pool = engine::NetMemoryPool::Instance().Stats();
+        ctx->metrics.SetNetPool(pool.peak_bytes, pool.failures);
         if (ctx->agones.IsShutdownRequested()) {
             ctx->tick_loop.RequestStop();
         }
@@ -264,6 +267,9 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    // Host and peer tables exist; from here every ENet allocation is served by the preallocated pool
+    engine::NetMemoryPool::Instance().Seal();
+
     const uint64_t max_ticks = benchmark_seconds * engine::kTickRate;
     context.tick_loop.Run(AuthoritativeTick, &context, max_ticks);
 
@@ -272,6 +278,7 @@ int main(int argc, char* argv[]) {
 
     const auto& telem = context.tick_loop.GetTelemetry();
     const auto& lag_telem = context.lag_comp.GetTelemetry();
+    const engine::NetMemoryStats pool = engine::NetMemoryPool::Instance().Stats();
 
     std::printf("\n====================================================================\n");
     std::printf(" Server Execution Report\n");
@@ -288,6 +295,10 @@ int main(int argc, char* argv[]) {
                 static_cast<unsigned long long>(lag_telem.legshots));
     std::printf(" Occluded Shots (Wall Hits): %llu\n", static_cast<unsigned long long>(lag_telem.occluded_shots));
     std::printf(" Rejected Rewinds: %llu\n", static_cast<unsigned long long>(lag_telem.rejected_rewinds));
+    std::printf(" Net Pool Peak: %zu of %zu KiB (Failures: %llu, Setup Heap Blocks: %llu)\n",
+                pool.peak_bytes / 1024, engine::kNetPoolArenaBytes / 1024,
+                static_cast<unsigned long long>(pool.failures),
+                static_cast<unsigned long long>(pool.heap_allocations));
     std::printf("====================================================================\n");
 
     context.metrics_server.Stop();

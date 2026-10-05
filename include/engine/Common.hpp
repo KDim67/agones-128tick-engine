@@ -35,6 +35,8 @@ constexpr uint32_t kMaxCatchupTicks = 4;
 
 constexpr uint8_t kProtocolVersion = 2;
 constexpr size_t kMaxPlayers = 10;
+// Channel 0 unsequenced state, channel 1 reliable control
+constexpr size_t kNetChannelCount = 2;
 constexpr size_t kMaxInputQueuePerClient = 64;
 // Bucket depth spans the input window so a held uplink drains; the per-tick cap bounds the catch-up burst
 constexpr uint32_t kInputBurstTokens = static_cast<uint32_t>(kMaxInputQueuePerClient);

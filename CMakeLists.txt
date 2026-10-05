@@ -54,6 +54,7 @@ add_executable(game_server
     src/main.cpp
     src/TickLoop.cpp
     src/NetServer.cpp
+    src/NetMemoryPool.cpp
     src/WorldState.cpp
     src/LagCompensation.cpp
     src/Metrics.cpp
