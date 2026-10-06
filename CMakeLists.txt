@@ -53,6 +53,7 @@ endfunction()
 add_executable(game_server
     src/main.cpp
     src/TickLoop.cpp
+    src/AuthoritativeServer.cpp
     src/NetServer.cpp
     src/NetMemoryPool.cpp
     src/WorldState.cpp
