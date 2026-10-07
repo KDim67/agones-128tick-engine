@@ -48,14 +48,22 @@ void AuthoritativeServer::ProcessSession(ClientSession& session, uint32_t curren
 
 void AuthoritativeServer::ResolveShot(uint32_t shooter_slot, const ClientInputPayload& input, uint32_t current_tick,
                                       uint32_t oldest_tick) noexcept {
-    const HitResult hit = lag_comp_.ProcessShot(world_state_, history_buffer_, shooter_slot, input.ack_tick,
-                                                input.sub_tick_fraction, input.interp_span_ticks, oldest_tick);
-    metrics_.RecordCombat(hit.fired, hit.hit, hit.occluded, hit.rejected);
+    // Too soon: the input still moved the player, but no round leaves the barrel
+    const bool throttled = !world_state_.TryFire(shooter_slot, input.sequence);
+    HitResult hit{};
+    if (throttled) {
+        metrics_.RecordThrottledShot();
+    } else {
+        hit = lag_comp_.ProcessShot(world_state_, history_buffer_, shooter_slot, input.ack_tick,
+                                    input.sub_tick_fraction, input.interp_span_ticks, oldest_tick);
+        metrics_.RecordCombat(hit.fired, hit.hit, hit.occluded, hit.rejected);
+    }
 
-    const ShotStatus status = hit.rejected ? ShotStatus::Rejected
-        : !hit.fired ? ShotStatus::ShooterDead
-        : hit.hit    ? ShotStatus::Hit
-                     : ShotStatus::Miss;
+    const ShotStatus status = throttled  ? ShotStatus::Throttled
+        : hit.rejected ? ShotStatus::Rejected
+        : !hit.fired   ? ShotStatus::ShooterDead
+        : hit.hit      ? ShotStatus::Hit
+                       : ShotStatus::Miss;
     const ShotResultPayload result{
         .input_sequence = input.sequence,
         .server_tick = current_tick,

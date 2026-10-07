@@ -46,6 +46,9 @@ public:
     // Record combat actions and lag compensation outcomes
     void RecordCombat(bool shot, bool hit, bool occluded, bool rejected) noexcept;
 
+    // Fire input refused by the weapon cooldown
+    void RecordThrottledShot() noexcept;
+
     // Update current connected client gauge
     void SetActivePlayers(uint32_t count) noexcept;
 
@@ -85,6 +88,7 @@ private:
     std::atomic<uint64_t> confirmed_hits_{0};
     std::atomic<uint64_t> occluded_shots_{0};
     std::atomic<uint64_t> rejected_rewinds_{0};
+    std::atomic<uint64_t> throttled_shots_{0};
 
     std::atomic<uint64_t> inputs_accepted_{0};
     std::atomic<uint64_t> inputs_missed_{0};

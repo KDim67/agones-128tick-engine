@@ -85,6 +85,7 @@ struct ServerSummary {
     double malformed{0.0};
     double net_pool_failures{0.0};
     double net_pool_peak_bytes{0.0};
+    double throttled_shots{0.0};
 };
 
 struct Totals {
@@ -104,6 +105,7 @@ struct Totals {
     uint64_t shots_mismatched{0};
     uint64_t shots_unconfirmed{0};
     uint64_t shots_rejected{0};
+    uint64_t shots_throttled{0};
     uint64_t shots_invalidated{0};
     uint64_t shots_gap_interpolated{0};
     uint64_t unexpected_results{0};
@@ -335,6 +337,7 @@ Totals Aggregate(const std::vector<std::unique_ptr<loadgen::BotClient>>& bots) {
         totals.shots_mismatched += s.shots_mismatched;
         totals.shots_unconfirmed += s.shots_unconfirmed;
         totals.shots_rejected += s.shots_rejected;
+        totals.shots_throttled += s.shots_throttled;
         totals.shots_invalidated += s.shots_invalidated;
         totals.shots_gap_interpolated += s.shots_gap_interpolated;
         totals.unexpected_results += s.unexpected_results;
@@ -381,6 +384,7 @@ ServerSummary SummarizeServer(const Endpoint& endpoint, const loadgen::MetricsSa
     summary.inputs_overflow = delta("game_client_inputs{outcome=\"overflow\"}");
     summary.malformed = delta("game_malformed_packets");
     summary.net_pool_failures = delta("game_net_pool_failures");
+    summary.throttled_shots = delta("game_throttled_shots");
     summary.net_pool_peak_bytes = after.Value("game_net_pool_peak_bytes");
     return summary;
 }
@@ -542,12 +546,14 @@ int main(int argc, char* argv[]) {
     double inputs_overflow = 0.0;
     double malformed = 0.0;
     double net_pool_failures = 0.0;
+    double throttled_shots = 0.0;
     for (const auto& server : servers) {
         inputs_accepted += server.inputs_accepted;
         inputs_missed += server.inputs_missed;
         inputs_overflow += server.inputs_overflow;
         malformed += server.malformed;
         net_pool_failures += server.net_pool_failures;
+        throttled_shots += server.throttled_shots;
     }
     // Overflow was accepted then pushed out of the window; missed never arrived
     const double inputs_lost = inputs_missed + inputs_overflow;
@@ -592,6 +598,10 @@ int main(int argc, char* argv[]) {
                       malformed, static_cast<unsigned long long>(totals.unexpected_results), net_pool_failures);
         checks.push_back({"transport integrity", malformed == 0.0 && totals.unexpected_results == 0 && net_pool_failures == 0.0,
                           detail});
+
+        // Bots honor the cooldown in client ticks, so any throttle means client and server disagree on fire timing
+        std::snprintf(detail, sizeof(detail), "%.0f fire inputs throttled by the server", throttled_shots);
+        checks.push_back({"weapon cooldown agreement", throttled_shots == 0.0, detail});
     }
     const bool all_passed = std::all_of(checks.begin(), checks.end(), [](const Check& c) { return c.passed; });
 
@@ -611,9 +621,10 @@ int main(int argc, char* argv[]) {
     std::printf("   Shots                   %llu fired, %llu invalidated by trades, %llu evaluated\n",
                 static_cast<unsigned long long>(totals.shots_fired), static_cast<unsigned long long>(totals.shots_invalidated),
                 static_cast<unsigned long long>(shots_evaluated));
-    std::printf("   Confirmed               %.3f%% | mismatched %llu | rejected %llu | unconfirmed %llu\n",
+    std::printf("   Confirmed               %.3f%% | mismatched %llu | rejected %llu | throttled %llu | unconfirmed %llu\n",
                 hit_confirmation * 100.0, static_cast<unsigned long long>(totals.shots_mismatched),
-                static_cast<unsigned long long>(totals.shots_rejected), static_cast<unsigned long long>(totals.shots_unconfirmed));
+                static_cast<unsigned long long>(totals.shots_rejected), static_cast<unsigned long long>(totals.shots_throttled),
+                static_cast<unsigned long long>(totals.shots_unconfirmed));
     std::printf("   Gap-interpolated shots  %.2f%%\n", gap_share * 100.0);
     std::printf("   Hit position error      p50 %.3f mm, p99 %.3f mm, max %.3f mm\n",
                 Percentile(totals.hit_error_m, 0.50) * kMetresToMm, hit_error_p99_mm,
@@ -664,11 +675,12 @@ int main(int argc, char* argv[]) {
                          static_cast<unsigned long long>(totals.reconcile_checks), misprediction_rate,
                          Percentile(totals.misprediction_error_m, 0.50), Percentile(totals.misprediction_error_m, 0.99));
             std::fprintf(report, "  \"hit_registration\": {\"fired\": %llu, \"invalidated\": %llu, \"evaluated\": %llu, \"confirmed\": %llu, "
-                                 "\"mismatched\": %llu, \"rejected\": %llu, \"unconfirmed\": %llu, \"unexpected\": %llu, \"confirmation_rate\": %.6f, "
+                                 "\"mismatched\": %llu, \"rejected\": %llu, \"throttled\": %llu, \"unconfirmed\": %llu, \"unexpected\": %llu, \"confirmation_rate\": %.6f, "
                                  "\"gap_interpolated_share\": %.6f, \"hit_error_p50_m\": %.6f, \"hit_error_p99_m\": %.6f, \"hit_error_max_m\": %.6f},\n",
                          static_cast<unsigned long long>(totals.shots_fired), static_cast<unsigned long long>(totals.shots_invalidated),
                          static_cast<unsigned long long>(shots_evaluated), static_cast<unsigned long long>(totals.shots_confirmed),
                          static_cast<unsigned long long>(totals.shots_mismatched), static_cast<unsigned long long>(totals.shots_rejected),
+                         static_cast<unsigned long long>(totals.shots_throttled),
                          static_cast<unsigned long long>(totals.shots_unconfirmed), static_cast<unsigned long long>(totals.unexpected_results),
                          hit_confirmation, gap_share,
                          Percentile(totals.hit_error_m, 0.50), Percentile(totals.hit_error_m, 0.99), Percentile(totals.hit_error_m, 1.0));
@@ -681,11 +693,11 @@ int main(int argc, char* argv[]) {
                                      "\"tick_p999_us\": %.0f, \"lateness_p99_us\": %.0f, \"overruns\": %.0f, \"ticks\": %.0f, "
                                      "\"inputs_accepted\": %.0f, \"inputs_missed\": %.0f, \"inputs_redundant\": %.0f, "
                                      "\"inputs_overflow\": %.0f, \"shots\": %.0f, \"hits\": %.0f, \"rejected_rewinds\": %.0f, \"malformed\": %.0f, "
-                                     "\"net_pool_peak_bytes\": %.0f, \"net_pool_failures\": %.0f}%s\n",
+                                     "\"net_pool_peak_bytes\": %.0f, \"net_pool_failures\": %.0f, \"throttled_shots\": %.0f}%s\n",
                              JsonEscape(s.endpoint).c_str(), s.scraped ? "true" : "false", s.tps, s.tick_p50_us, s.tick_p99_us,
                              s.tick_p999_us, s.lateness_p99_us, s.overruns, s.ticks, s.inputs_accepted, s.inputs_missed,
                              s.inputs_redundant, s.inputs_overflow, s.shots, s.hits, s.rejected_rewinds, s.malformed,
-                             s.net_pool_peak_bytes, s.net_pool_failures, i + 1 < servers.size() ? "," : "");
+                             s.net_pool_peak_bytes, s.net_pool_failures, s.throttled_shots, i + 1 < servers.size() ? "," : "");
             }
             std::fprintf(report, "  ],\n  \"checks\": [\n");
             for (size_t i = 0; i < checks.size(); ++i) {

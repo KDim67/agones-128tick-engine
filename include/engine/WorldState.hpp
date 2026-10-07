@@ -27,6 +27,8 @@ constexpr float kAirAcceleration = 12.0f;
 constexpr float kGroundFriction = 10.0f;
 constexpr float kGravity = 22.0f;
 constexpr float kJumpVelocity = 6.5f;
+// ~590 RPM, counted in client ticks so a burst of late inputs is not mistaken for rapid fire
+constexpr uint32_t kFireIntervalTicks = 13;
 constexpr AABB kArenaBounds{Vec3{-50.0f, 0.0f, -50.0f}, Vec3{50.0f, 30.0f, 50.0f}};
 
 constexpr size_t kObstacleCount = 4;
@@ -50,6 +52,8 @@ struct PlayerEntity {
     uint32_t respawn_tick{0};
     // Bumped on every spawn and respawn; a rewind never reaches across it
     uint32_t spawn_id{0};
+    // Input sequence of the last shot taken; 0 until this occupant fires
+    uint32_t last_fire_sequence{0};
 
     [[nodiscard]] bool IsAlive() const noexcept { return (flags & EntityFlag_Alive) != 0 && health > 0; }
     [[nodiscard]] bool IsGrounded() const noexcept { return (flags & EntityFlag_Grounded) != 0; }
@@ -110,6 +114,9 @@ public:
     }
 
     void IntegratePlayerInput(uint32_t slot_id, const ClientInputPayload& input, double dt) noexcept;
+
+    // Spends the weapon cooldown; false means too soon. Dead shooters pass so the shot resolves as ShooterDead
+    [[nodiscard]] bool TryFire(uint32_t slot_id, uint32_t input_sequence) noexcept;
     [[nodiscard]] bool RaycastWorld(const Ray& ray, float max_dist, float& out_hit_dist) const noexcept;
 
     [[nodiscard]] std::array<PlayerEntity, kMaxPlayers>& GetPlayers() noexcept { return players_; }

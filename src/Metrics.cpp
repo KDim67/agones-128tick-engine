@@ -33,6 +33,10 @@ void Metrics::RecordCombat(bool shot, bool hit, bool occluded, bool rejected) no
     if (rejected) rejected_rewinds_.fetch_add(1, std::memory_order_relaxed);
 }
 
+void Metrics::RecordThrottledShot() noexcept {
+    throttled_shots_.fetch_add(1, std::memory_order_relaxed);
+}
+
 void Metrics::SetActivePlayers(uint32_t count) noexcept {
     active_players_.store(count, std::memory_order_relaxed);
 }
@@ -139,6 +143,11 @@ size_t Metrics::Serialize(char* out_buffer, size_t max_bytes) const noexcept {
     append("# TYPE game_rejected_rewinds counter\n");
     append("game_rejected_rewinds %llu\n",
            static_cast<unsigned long long>(rejected_rewinds_.load(std::memory_order_relaxed)));
+
+    append("# HELP game_throttled_shots Fire inputs refused by the weapon cooldown\n");
+    append("# TYPE game_throttled_shots counter\n");
+    append("game_throttled_shots %llu\n",
+           static_cast<unsigned long long>(throttled_shots_.load(std::memory_order_relaxed)));
 
     append("# HELP game_client_inputs Client inputs by ingest outcome\n");
     append("# TYPE game_client_inputs counter\n");

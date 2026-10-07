@@ -383,6 +383,10 @@ void BotClient::OnShotResult(const engine::ShotResultPayload& result) noexcept {
 
     // Trades: the shooter died first, or the predicted victim was no longer a target when the shot ran
     const auto status = static_cast<engine::ShotStatus>(result.status);
+    if (status == engine::ShotStatus::Throttled) {
+        ++stats_.shots_throttled;
+        return;
+    }
     if (status == engine::ShotStatus::Rejected) {
         ++stats_.shots_rejected;
         return;
@@ -529,8 +533,11 @@ void BotClient::StepInput(Clock::time_point now) noexcept {
         predicted_positions_[sequence_ % kInputRing] = self.position;
     }
 
+    // Same cooldown the server enforces, in the same client-tick units
+    const bool weapon_ready = last_fire_sequence_ == 0 || sequence_ - last_fire_sequence_ >= engine::kFireIntervalTicks;
+
     // Fire only on a predicted hit so every shot carries a verifiable verdict
-    if (alive && target != kNoTick && now >= next_fire_) {
+    if (alive && target != kNoTick && weapon_ready && now >= next_fire_) {
         const engine::Ray ray{self.GetEyePosition(), engine::AnglesToDirection(input.view_pitch, input.view_yaw)};
         const engine::HitResult predicted = engine::TraceShot(local_world_, view.snapshot.players, slot_, ray, engine::kMaxShotRange);
         if (predicted.hit) {
@@ -544,6 +551,7 @@ void BotClient::StepInput(Clock::time_point now) noexcept {
             shot.counted = measuring_;
             shot.resolved = false;
             next_fire_ = now + config_.fire_interval;
+            last_fire_sequence_ = sequence_;
 
             if (measuring_) {
                 ++stats_.shots_fired;

@@ -55,6 +55,7 @@ struct BotStats {
     uint64_t shots_mismatched{0};
     uint64_t shots_unconfirmed{0};
     uint64_t shots_rejected{0};
+    uint64_t shots_throttled{0};
     uint64_t shots_invalidated{0};
     uint64_t shots_gap_interpolated{0};
     uint64_t unexpected_results{0};
@@ -157,6 +158,7 @@ private:
 
     std::array<PendingShot, kShotRing> shots_{};
     Clock::time_point next_fire_{};
+    uint32_t last_fire_sequence_{0};
     uint32_t target_slot_{kNoTick};
     engine::HitZone aim_zone_{engine::HitZone::Torso};
 

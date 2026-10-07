@@ -131,6 +131,12 @@
           "expr": "rate(game_rejected_rewinds[1m])",
           "legendFormat": "Rejected Rewinds/sec",
           "refId": "D"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "rate(game_throttled_shots[1m])",
+          "legendFormat": "Throttled Shots/sec",
+          "refId": "E"
         }
       ],
       "fieldConfig": {

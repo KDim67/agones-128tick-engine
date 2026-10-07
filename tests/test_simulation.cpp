@@ -401,6 +401,35 @@ void TestViewAngleClampIdempotent() {
     std::printf("  -> Client and server clamps agree: a second pass never moves the ray.\n");
 }
 
+void TestWeaponCooldown() {
+    std::printf("[Test] Running Weapon Cooldown in Client Ticks...\n");
+    engine::WorldState world;
+    world.SpawnPlayer(0, engine::Vec3{0.0f, 0.0f, 0.0f});
+
+    CHECK(world.TryFire(0, 100));
+    CHECK(!world.TryFire(0, 100 + engine::kFireIntervalTicks - 1));
+    CHECK(world.TryFire(0, 100 + engine::kFireIntervalTicks));
+
+    // A burst released after a network hold is judged by sequence, not arrival tick: full rate, no more
+    const uint32_t base = 100 + engine::kFireIntervalTicks;
+    uint32_t accepted = 0;
+    for (uint32_t sequence = base + 1; sequence <= base + 4 * engine::kFireIntervalTicks; ++sequence) {
+        accepted += world.TryFire(0, sequence) ? 1u : 0u;
+    }
+    CHECK(accepted == 4);
+
+    // Dead shooters pass without spending the cooldown; a new occupant starts with a ready weapon
+    auto* player = world.GetPlayer(0);
+    const uint32_t last = player->last_fire_sequence;
+    CHECK(player->TakeDamage(200));
+    CHECK(world.TryFire(0, last + 1) && player->last_fire_sequence == last);
+    world.SpawnPlayer(0, engine::Vec3{0.0f, 0.0f, 0.0f});
+    CHECK(world.TryFire(0, 1));
+
+    std::printf("  -> One shot per %u client ticks (%.0f RPM); late bursts keep full rate, dead and rejoined players handled.\n",
+                engine::kFireIntervalTicks, 60.0 * engine::kTickRate / engine::kFireIntervalTicks);
+}
+
 } // namespace
 
 int main() {
@@ -419,6 +448,7 @@ int main() {
     TestRewindNeverCrossesSpawn();
     TestRewindBackstop();
     TestViewAngleClampIdempotent();
+    TestWeaponCooldown();
 
     std::printf("\nAll Simulation Verification Checks PASSED (100%%).\n");
     return 0;

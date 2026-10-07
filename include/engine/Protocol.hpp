@@ -109,7 +109,8 @@ enum class ShotStatus : uint8_t {
     Hit = 0,
     Miss = 1,
     Rejected = 2,
-    ShooterDead = 3
+    ShooterDead = 3,
+    Throttled = 4
 };
 
 // Authoritative verdict for every fire input; target_mask has a bit per slot that was hittable at the rewound tick

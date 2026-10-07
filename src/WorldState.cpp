@@ -28,6 +28,7 @@ void WorldState::SpawnPlayer(uint32_t slot_id, const Vec3& spawn_position) noexc
     p.view_yaw = 0.0f;
     p.last_applied_input_seq = 0;
     p.respawn_tick = 0;
+    p.last_fire_sequence = 0;
     ++p.spawn_id;
 }
 
@@ -59,6 +60,18 @@ void WorldState::DespawnPlayer(uint32_t slot_id) noexcept {
         players_[slot_id].is_active = false;
         players_[slot_id].flags = EntityFlag_None;
     }
+}
+
+bool WorldState::TryFire(uint32_t slot_id, uint32_t input_sequence) noexcept {
+    PlayerEntity* player = GetPlayer(slot_id);
+    if (!player || !player->IsAlive()) {
+        return true;
+    }
+    if (player->last_fire_sequence != 0 && input_sequence - player->last_fire_sequence < kFireIntervalTicks) {
+        return false;
+    }
+    player->last_fire_sequence = input_sequence;
+    return true;
 }
 
 PlayerEntity* WorldState::GetPlayer(uint32_t slot_id) noexcept {
