@@ -118,11 +118,26 @@ add_executable(test_protocol
 )
 engine_configure_target(test_protocol)
 
+add_executable(test_allocation
+    tests/test_allocation.cpp
+    src/AuthoritativeServer.cpp
+    src/NetServer.cpp
+    src/NetMemoryPool.cpp
+    src/WorldState.cpp
+    src/LagCompensation.cpp
+    src/Metrics.cpp
+)
+engine_configure_target(test_allocation)
+target_include_directories(test_allocation PRIVATE ${enet_SOURCE_DIR}/include)
+target_link_libraries(test_allocation PRIVATE enet)
+
 enable_testing()
 add_test(NAME test_simulation COMMAND test_simulation)
 add_test(NAME test_telemetry COMMAND test_telemetry)
 add_test(NAME test_orchestration COMMAND test_orchestration)
 add_test(NAME test_protocol COMMAND test_protocol)
+add_test(NAME test_allocation COMMAND test_allocation)
+set_tests_properties(test_allocation PROPERTIES TIMEOUT 60)
 
 install(TARGETS game_server RUNTIME DESTINATION bin COMPONENT runtime)
 if(ENGINE_BUILD_TOOLS)

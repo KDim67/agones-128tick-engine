@@ -4,6 +4,13 @@
 
 namespace engine {
 
+namespace {
+
+// Peers mid-handshake or mid-close live outside the session slots, so a departing player never blocks a joining one
+constexpr size_t kSpareNetPeers = 4;
+
+} // namespace
+
 NetServer::NetServer() noexcept {
     for (size_t i = 0; i < kMaxPlayers; ++i) {
         sessions_[i].slot_id = static_cast<uint32_t>(i);
@@ -16,7 +23,7 @@ NetServer::~NetServer() {
     Shutdown();
 }
 
-bool NetServer::Initialize(uint16_t bind_port) noexcept {
+bool NetServer::Initialize(uint16_t bind_port, const char* bind_host) noexcept {
     if (!NetMemoryPool::Instance().InstallEnetCallbacks()) {
         return false;
     }
@@ -24,8 +31,12 @@ bool NetServer::Initialize(uint16_t bind_port) noexcept {
     ENetAddress address;
     address.host = ENET_HOST_ANY;
     address.port = bind_port;
+    if (bind_host && enet_address_set_host_ip(&address, bind_host) != 0) {
+        enet_deinitialize();
+        return false;
+    }
 
-    host_ = enet_host_create(&address, kMaxPlayers, kNetChannelCount, 0, 0);
+    host_ = enet_host_create(&address, kMaxPlayers + kSpareNetPeers, kNetChannelCount, 0, 0);
     if (!host_) {
         enet_deinitialize();
         return false;
@@ -35,6 +46,14 @@ bool NetServer::Initialize(uint16_t bind_port) noexcept {
     host_->maximumPacketSize = kMaxMtuPayload;
     host_->maximumWaitingData = kMaxMtuPayload * kMaxInputQueuePerClient;
     return true;
+}
+
+uint16_t NetServer::BoundPort() const noexcept {
+    ENetAddress address{};
+    if (!host_ || enet_socket_get_address(host_->socket, &address) != 0) {
+        return 0;
+    }
+    return address.port;
 }
 
 void NetServer::Shutdown() noexcept {
@@ -129,7 +148,8 @@ void NetServer::HandleConnect(ENetPeer* peer) noexcept {
             return;
         }
     }
-    enet_peer_reset(peer);
+    // Full: tell the client now instead of leaving it to time out
+    enet_peer_disconnect_now(peer, 0);
 }
 
 void NetServer::HandleDisconnect(ENetPeer* peer) noexcept {
@@ -225,10 +245,10 @@ void NetServer::HandlePacket(ENetPeer* peer, const uint8_t* data, size_t length)
         return;
     }
 
-    // Release the ENet peer as well, or a goodbye leaves the link holding a host slot
+    // The client is already closing; a graceful close here would cross its own and hold the peer until timeout
     if (packet_type == PacketType::Disconnect) {
-        enet_peer_disconnect_later(peer, 0);
         HandleDisconnect(peer);
+        enet_peer_disconnect_now(peer, 0);
     }
 }
 

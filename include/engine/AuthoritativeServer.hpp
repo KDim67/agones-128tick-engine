@@ -19,7 +19,9 @@ public:
     AuthoritativeServer(const AuthoritativeServer&) = delete;
     AuthoritativeServer& operator=(const AuthoritativeServer&) = delete;
 
-    bool Initialize(uint16_t bind_port) noexcept { return net_server_.Initialize(bind_port); }
+    bool Initialize(uint16_t bind_port, const char* bind_host = nullptr) noexcept {
+        return net_server_.Initialize(bind_port, bind_host);
+    }
     void Shutdown() noexcept { net_server_.Shutdown(); }
 
     void Tick(uint32_t current_tick, double dt) noexcept;

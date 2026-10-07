@@ -45,8 +45,12 @@ public:
     NetServer(const NetServer&) = delete;
     NetServer& operator=(const NetServer&) = delete;
 
-    bool Initialize(uint16_t bind_port) noexcept;
+    // Null bind_host listens on every interface
+    bool Initialize(uint16_t bind_port, const char* bind_host = nullptr) noexcept;
     void Shutdown() noexcept;
+
+    // Actual UDP port, resolved when bound to port 0
+    [[nodiscard]] uint16_t BoundPort() const noexcept;
 
     // Non-blocking packet poll executed at the start of each tick
     void PollEvents(uint32_t current_tick) noexcept;
