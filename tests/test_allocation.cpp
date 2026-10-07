@@ -109,6 +109,10 @@ constexpr uint32_t kLeaveTick = 96;
 constexpr uint32_t kRejoinTick = 112;
 constexpr uint32_t kFirePeriodTicks = 32;
 constexpr size_t kLeavingClient = 3;
+constexpr uint32_t kDeafTick = 200;
+// Slot 0 fires every tick to exercise the cooldown; slot 9 stops acking to exercise the reliable backlog cap
+constexpr uint32_t kSpammerSlot = 0;
+constexpr uint32_t kDeafSlot = static_cast<uint32_t>(engine::kMaxPlayers) - 1;
 
 // Minimal in-process player: stands at its slot spawn facing +x, so every shot meets the next slot's head
 struct TestClient {
@@ -118,7 +122,9 @@ struct TestClient {
     uint32_t sequence{0};
     uint32_t last_snapshot_tick{0};
     bool joined{false};
+    bool deaf{false};
     uint64_t shot_results{0};
+    uint64_t throttled_results{0};
     uint64_t hits_taken{0};
     std::array<engine::ClientInputPayload, engine::kInputRedundancy> recent{};
 
@@ -177,9 +183,13 @@ struct TestClient {
                 last_snapshot_tick = std::max(last_snapshot_tick, tick);
                 break;
             }
-            case engine::PacketType::ShotResult:
+            case engine::PacketType::ShotResult: {
+                engine::ShotResultPayload result;
+                std::memcpy(&result, payload, sizeof(result));
                 ++shot_results;
+                throttled_results += result.status == static_cast<uint8_t>(engine::ShotStatus::Throttled) ? 1u : 0u;
                 break;
+            }
             case engine::PacketType::HitNotification:
                 ++hits_taken;
                 break;
@@ -188,9 +198,10 @@ struct TestClient {
         }
     }
 
+    // A deaf client still sends but never reads, so it never acks
     void Service() {
         ENetEvent event;
-        while (host && enet_host_service(host, &event, 0) > 0) {
+        while (host && !deaf && enet_host_service(host, &event, 0) > 0) {
             if (event.type == ENET_EVENT_TYPE_CONNECT) {
                 const engine::ConnectRequestPayload request{.protocol_version = engine::kProtocolVersion, .client_auth_token = 0};
                 Send(engine::PacketType::ConnectRequest, &request, sizeof(request), true);
@@ -213,7 +224,9 @@ struct TestClient {
         input.ack_tick = last_snapshot_tick;
         input.interp_span_ticks = 1;
         input.view_yaw = 90.0f;
-        input.input_flags = (tick + slot * 3) % kFirePeriodTicks == 0 ? engine::InputFlag_Fire : engine::InputFlag_None;
+        const bool spamming = deaf || slot == kSpammerSlot;
+        input.input_flags = (spamming || (tick + slot * 3) % kFirePeriodTicks == 0) ? engine::InputFlag_Fire
+                                                                                     : engine::InputFlag_None;
 
         std::rotate(recent.begin(), recent.begin() + 1, recent.end());
         recent.back() = input;
@@ -236,7 +249,7 @@ struct TestClient {
 };
 
 void TestSteadyStateTickIsAllocationFree() {
-    std::printf("[Test] Running Live Tick Allocation Audit (10 ENet clients, shots, kills, respawns, rejoin)...\n");
+    std::printf("[Test] Running Live Tick Allocation Audit (10 ENet clients, kills, respawns, rejoin, fire spam, deaf client)...\n");
     engine::Metrics metrics;
     engine::AuthoritativeServer server{metrics};
     CHECK(server.Initialize(0, "127.0.0.1"));
@@ -285,6 +298,11 @@ void TestSteadyStateTickIsAllocationFree() {
         if (tick - soak_start == kLeaveTick) {
             clients[kLeavingClient].Leave();
         }
+        if (tick - soak_start == kDeafTick) {
+            for (auto& client : clients) {
+                client.deaf = client.joined && client.slot == kDeafSlot;
+            }
+        }
         if (tick - soak_start == kRejoinTick) {
             CHECK(clients.back().Connect(address));
         }
@@ -306,16 +324,25 @@ void TestSteadyStateTickIsAllocationFree() {
         CHECK(client.shot_results > 0);
     }
 
+    // Spammer fires every tick but lands at most one round per cooldown; the deaf client is cut off at the backlog cap
+    const auto spammer = std::find_if(clients.begin(), clients.end(), [](const TestClient& c) { return c.slot == kSpammerSlot; });
+    CHECK(spammer != clients.end() && spammer->throttled_results > 0);
+    CHECK(spammer->shot_results - spammer->throttled_results <= (tick - 1) / engine::kFireIntervalTicks + 1);
+    CHECK(server.Net().GetTelemetry().backlog_disconnects == 1);
+    CHECK(server.Net().GetActivePlayerCount() == engine::kMaxPlayers - 1);
+    CHECK(server.Net().GetSessions()[kDeafSlot].state == engine::SessionState::Disconnected);
+
     for (auto& client : clients) {
         client.Destroy();
     }
     server.Shutdown();
     CHECK(pool.Stats().in_use_bytes == 0);
 
-    std::printf("  -> %u ticks, %llu shots, %llu hits: 0 C++ heap allocations in the tick, pool peak %zu of %zu KiB, "
-                "%llu setup heap blocks, all blocks returned.\n",
+    std::printf("  -> %u ticks, %llu shots, %llu hits, %llu spam shots throttled, 1 deaf client cut off: 0 C++ heap allocations "
+                "in the tick, pool peak %zu of %zu KiB, %llu setup heap blocks, all blocks returned.\n",
                 tick - 1, static_cast<unsigned long long>(combat.total_shots),
-                static_cast<unsigned long long>(combat.registered_hits), soaked.peak_bytes / 1024,
+                static_cast<unsigned long long>(combat.registered_hits),
+                static_cast<unsigned long long>(spammer->throttled_results), soaked.peak_bytes / 1024,
                 engine::kNetPoolArenaBytes / 1024, static_cast<unsigned long long>(soaked.heap_allocations));
 }
 

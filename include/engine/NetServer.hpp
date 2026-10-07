@@ -34,6 +34,7 @@ struct NetTelemetry {
     uint64_t inputs_redundant{0};
     uint64_t inputs_overflow{0};
     uint64_t packets_malformed{0};
+    uint64_t backlog_disconnects{0};
 };
 
 // Zero-allocation non-blocking UDP authoritative transport
@@ -85,6 +86,11 @@ public:
         return peak;
     }
 
+    // Peers mid-handshake or mid-close live outside the session slots, so a departing player never blocks a joining one
+    static constexpr size_t kSpareNetPeers = 4;
+    // Unacked reliable packets one peer may hold in the pool; honest peers sit in single digits
+    static constexpr uint32_t kMaxReliableBacklog = 64;
+
 private:
     void HandlePacket(ENetPeer* peer, const uint8_t* data, size_t length) noexcept;
     void HandleConnect(ENetPeer* peer) noexcept;
@@ -101,6 +107,7 @@ private:
     std::chrono::steady_clock::time_point last_poll_{};
     std::chrono::nanoseconds credit_carry_{0};
     uint32_t input_backlog_peak_{0};
+    std::array<uint32_t, kMaxPlayers + kSpareNetPeers> reliable_in_flight_{};
 };
 
 } // namespace engine

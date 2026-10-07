@@ -60,7 +60,7 @@ void AuthoritativeTick(uint64_t tick_index, double dt, void* user_data) {
                                       net.inputs_overflow, net.packets_malformed);
         ctx->metrics.SetInputBacklogPeak(ctx->server.Net().TakeInputBacklogPeak());
         const engine::NetMemoryStats pool = engine::NetMemoryPool::Instance().Stats();
-        ctx->metrics.SetNetPool(pool.peak_bytes, pool.failures);
+        ctx->metrics.SetTransportHealth(pool.peak_bytes, pool.failures, net.backlog_disconnects);
         if (ctx->agones.IsShutdownRequested()) {
             ctx->tick_loop.RequestStop();
         }

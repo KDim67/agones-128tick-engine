@@ -4,10 +4,20 @@
 
 namespace engine {
 
+// Every session at its reliable cap still leaves the pool room for live traffic: header and payload blocks plus one command each
+static_assert(kMaxPlayers * NetServer::kMaxReliableBacklog * 2 <= kNetPoolClasses[0].blocks * 3 / 4);
+static_assert(kMaxPlayers * NetServer::kMaxReliableBacklog <= kNetPoolClasses[1].blocks / 2);
+static_assert(sizeof(PacketHeader) + kMaxControlPayloadBytes <= kNetPoolClasses[0].block_bytes);
+
 namespace {
 
-// Peers mid-handshake or mid-close live outside the session slots, so a departing player never blocks a joining one
-constexpr size_t kSpareNetPeers = 4;
+// ENet frees a reliable packet once acked or when its peer resets
+void ENET_CALLBACK ReleaseReliable(ENetPacket* packet) {
+    auto* in_flight = static_cast<uint32_t*>(packet->userData);
+    if (*in_flight > 0) {
+        --*in_flight;
+    }
+}
 
 } // namespace
 
@@ -313,10 +323,31 @@ void NetServer::SendPacket(uint32_t slot_id, PacketType type, const void* payloa
     const enet_uint8 channel = reliable ? 1 : 0;
 
     ENetPacket* packet = enet_packet_create(control_buffer_.data(), total_size, flags);
-    if (packet) {
-        enet_peer_send(session.peer, channel, packet);
-        enet_host_flush(host_);
+    if (!packet) {
+        return;
     }
+
+    if (reliable) {
+        // A peer that stops acking would otherwise pin pool blocks until ENet times it out
+        auto& in_flight = reliable_in_flight_[static_cast<size_t>(session.peer - host_->peers)];
+        if (in_flight >= kMaxReliableBacklog) {
+            enet_packet_destroy(packet);
+            ++telemetry_.backlog_disconnects;
+            ENetPeer* peer = session.peer;
+            HandleDisconnect(peer);
+            enet_peer_disconnect_now(peer, 0);
+            return;
+        }
+        ++in_flight;
+        packet->userData = &in_flight;
+        packet->freeCallback = &ReleaseReliable;
+    }
+
+    if (enet_peer_send(session.peer, channel, packet) != 0) {
+        enet_packet_destroy(packet);
+        return;
+    }
+    enet_host_flush(host_);
 }
 
 void NetServer::BroadcastSnapshot(const ServerSnapshotPayload& snapshot) noexcept {
@@ -346,6 +377,10 @@ void NetServer::BroadcastSnapshot(const ServerSnapshotPayload& snapshot) noexcep
         }
     }
 
+    // No peer took a reference: the packet is still ours to free
+    if (packet->referenceCount == 0) {
+        enet_packet_destroy(packet);
+    }
     enet_host_flush(host_);
 }
 

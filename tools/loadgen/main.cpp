@@ -85,6 +85,7 @@ struct ServerSummary {
     double malformed{0.0};
     double net_pool_failures{0.0};
     double net_pool_peak_bytes{0.0};
+    double backlog_disconnects{0.0};
     double throttled_shots{0.0};
 };
 
@@ -384,6 +385,7 @@ ServerSummary SummarizeServer(const Endpoint& endpoint, const loadgen::MetricsSa
     summary.inputs_overflow = delta("game_client_inputs{outcome=\"overflow\"}");
     summary.malformed = delta("game_malformed_packets");
     summary.net_pool_failures = delta("game_net_pool_failures");
+    summary.backlog_disconnects = delta("game_reliable_backlog_disconnects");
     summary.throttled_shots = delta("game_throttled_shots");
     summary.net_pool_peak_bytes = after.Value("game_net_pool_peak_bytes");
     return summary;
@@ -546,6 +548,7 @@ int main(int argc, char* argv[]) {
     double inputs_overflow = 0.0;
     double malformed = 0.0;
     double net_pool_failures = 0.0;
+    double backlog_disconnects = 0.0;
     double throttled_shots = 0.0;
     for (const auto& server : servers) {
         inputs_accepted += server.inputs_accepted;
@@ -553,6 +556,7 @@ int main(int argc, char* argv[]) {
         inputs_overflow += server.inputs_overflow;
         malformed += server.malformed;
         net_pool_failures += server.net_pool_failures;
+        backlog_disconnects += server.backlog_disconnects;
         throttled_shots += server.throttled_shots;
     }
     // Overflow was accepted then pushed out of the window; missed never arrived
@@ -593,10 +597,11 @@ int main(int argc, char* argv[]) {
     }
     {
         // netem never corrupts or duplicates, and the pool is sized for full load, so any of these is a fault
-        char detail[128];
-        std::snprintf(detail, sizeof(detail), "%.0f malformed packets, %llu unexpected shot results, %.0f pool refusals",
-                      malformed, static_cast<unsigned long long>(totals.unexpected_results), net_pool_failures);
-        checks.push_back({"transport integrity", malformed == 0.0 && totals.unexpected_results == 0 && net_pool_failures == 0.0,
+        char detail[160];
+        std::snprintf(detail, sizeof(detail), "%.0f malformed packets, %llu unexpected shot results, %.0f pool refusals, %.0f backlog cutoffs",
+                      malformed, static_cast<unsigned long long>(totals.unexpected_results), net_pool_failures, backlog_disconnects);
+        checks.push_back({"transport integrity",
+                          malformed == 0.0 && totals.unexpected_results == 0 && net_pool_failures == 0.0 && backlog_disconnects == 0.0,
                           detail});
 
         // Bots honor the cooldown in client ticks, so any throttle means client and server disagree on fire timing
@@ -693,11 +698,13 @@ int main(int argc, char* argv[]) {
                                      "\"tick_p999_us\": %.0f, \"lateness_p99_us\": %.0f, \"overruns\": %.0f, \"ticks\": %.0f, "
                                      "\"inputs_accepted\": %.0f, \"inputs_missed\": %.0f, \"inputs_redundant\": %.0f, "
                                      "\"inputs_overflow\": %.0f, \"shots\": %.0f, \"hits\": %.0f, \"rejected_rewinds\": %.0f, \"malformed\": %.0f, "
-                                     "\"net_pool_peak_bytes\": %.0f, \"net_pool_failures\": %.0f, \"throttled_shots\": %.0f}%s\n",
+                                     "\"net_pool_peak_bytes\": %.0f, \"net_pool_failures\": %.0f, \"backlog_disconnects\": %.0f, "
+                                     "\"throttled_shots\": %.0f}%s\n",
                              JsonEscape(s.endpoint).c_str(), s.scraped ? "true" : "false", s.tps, s.tick_p50_us, s.tick_p99_us,
                              s.tick_p999_us, s.lateness_p99_us, s.overruns, s.ticks, s.inputs_accepted, s.inputs_missed,
                              s.inputs_redundant, s.inputs_overflow, s.shots, s.hits, s.rejected_rewinds, s.malformed,
-                             s.net_pool_peak_bytes, s.net_pool_failures, s.throttled_shots, i + 1 < servers.size() ? "," : "");
+                             s.net_pool_peak_bytes, s.net_pool_failures, s.backlog_disconnects, s.throttled_shots,
+                             i + 1 < servers.size() ? "," : "");
             }
             std::fprintf(report, "  ],\n  \"checks\": [\n");
             for (size_t i = 0; i < checks.size(); ++i) {
