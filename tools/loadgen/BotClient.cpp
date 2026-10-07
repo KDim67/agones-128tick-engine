@@ -511,9 +511,11 @@ void BotClient::StepInput(Clock::time_point now) noexcept {
             // Server traces from the post-move eye; refine the aim against a trial integration
             engine::WorldState trial = local_world_;
             engine::ClientInputPayload trial_input = input;
-            trial_input.view_pitch = view_pitch_;
-            trial_input.view_yaw = view_yaw_;
-            engine::ValidateAndClampViewAngles(trial_input.view_pitch, trial_input.view_yaw);
+            float trial_pitch = view_pitch_;
+            float trial_yaw = view_yaw_;
+            engine::ValidateAndClampViewAngles(trial_pitch, trial_yaw);
+            trial_input.view_pitch = trial_pitch;
+            trial_input.view_yaw = trial_yaw;
             trial.IntegratePlayerInput(slot_, trial_input, engine::kFixedDeltaTimeSec);
             AnglesTowards(trial.GetPlayers()[slot_].GetEyePosition(), aim_point, view_pitch_, view_yaw_);
         }
@@ -522,11 +524,10 @@ void BotClient::StepInput(Clock::time_point now) noexcept {
         view_yaw_ += 0.5f;
     }
 
+    // Clamp the aligned members, then copy into the packed wire struct
+    engine::ValidateAndClampViewAngles(view_pitch_, view_yaw_);
     input.view_pitch = view_pitch_;
     input.view_yaw = view_yaw_;
-    engine::ValidateAndClampViewAngles(input.view_pitch, input.view_yaw);
-    view_pitch_ = input.view_pitch;
-    view_yaw_ = input.view_yaw;
 
     if (predicting_) {
         local_world_.IntegratePlayerInput(slot_, input, engine::kFixedDeltaTimeSec);

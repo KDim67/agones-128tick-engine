@@ -236,11 +236,16 @@ void NetServer::HandlePacket(ENetPeer* peer, const uint8_t* data, size_t length)
         // Any arrival order; copies of buffered or consumed inputs are redundancy, not loss
         for (size_t k = 0; k < count; ++k) {
             ClientInputPayload& input = input_batch_[k];
+            // Packed wire fields are unaligned; clamp aligned copies rather than binding references to them
+            float pitch = input.view_pitch;
+            float yaw = input.view_yaw;
             if (!std::isfinite(input.sub_tick_fraction) || input.interp_span_ticks > kMaxInterpSpanTicks ||
-                !ValidateAndClampViewAngles(input.view_pitch, input.view_yaw)) {
+                !ValidateAndClampViewAngles(pitch, yaw)) {
                 ++telemetry_.packets_malformed;
                 return;
             }
+            input.view_pitch = pitch;
+            input.view_yaw = yaw;
 
             InputLoss loss{};
             if (session->inputs.Insert(input, loss) == InputInsert::Accepted) {
