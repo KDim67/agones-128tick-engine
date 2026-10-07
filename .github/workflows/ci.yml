@@ -1,0 +1,158 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  msvc:
+    name: MSVC /W4 /WX
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Configure
+        run: cmake -S . -B build -A x64
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+
+  gcc:
+    name: GCC 14 ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: strict
+            build_type: Release
+            sanitizers: 'OFF'
+          - name: ASan + UBSan
+            build_type: RelWithDebInfo
+            sanitizers: 'ON'
+    env:
+      ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+      UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends g++-14 ninja-build
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+          -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14
+          -DENABLE_SANITIZERS=${{ matrix.sanitizers }}
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      # ctest never runs the real server against real bots; this does, instrumented
+      - name: Sanitized match
+        if: matrix.sanitizers == 'ON'
+        run: |
+          ./build/game_server --port 7777 --metrics-port 9090 > server.log 2>&1 &
+          server=$!
+          for _ in $(seq 1 50); do (exec 3<>/dev/tcp/127.0.0.1/9090) 2>/dev/null && break; sleep 0.1; done
+          ./build/load_generator --server 127.0.0.1:7777 --metrics 127.0.0.1:9090 \
+            --clients 10 --warmup 3 --duration 15 --drain 2 --label sanitized
+          kill -TERM "$server"
+          wait "$server"
+          if grep -E "runtime error|Sanitizer" server.log; then exit 1; fi
+
+  container:
+    name: Images and benchmark gate
+    needs: gcc
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      # gRPC builds from source; layer cache keeps it to the first run
+      - name: Build runtime image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          target: runtime
+          tags: agones-128tick-engine:ci
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build bench image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          target: bench
+          tags: agones-128tick-engine-bench:ci
+          load: true
+          cache-from: type=gha
+
+      # Exported root filesystem: uncompressed and independent of the image store
+      - name: Runtime image under 80 MiB
+        run: |
+          container=$(docker create agones-128tick-engine:ci)
+          size=$(docker export "$container" | wc -c)
+          docker rm "$container" > /dev/null
+          echo "runtime root filesystem: $((size / 1024 / 1024)) MiB"
+          test "$size" -le $((80 * 1024 * 1024))
+
+      # Hosted kernels ship netem, prio and u32 as modules, some only in the extra package
+      - name: Load netem modules
+        run: |
+          if ! sudo modprobe -a sch_netem sch_prio cls_u32; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends "linux-modules-extra-$(uname -r)"
+            sudo modprobe -a sch_netem sch_prio cls_u32
+          fi
+
+      - name: Baseline benchmark
+        run: |
+          mkdir -p "$RUNNER_TEMP/reports"
+          docker run --rm --cap-add NET_ADMIN -v "$RUNNER_TEMP/reports:/reports" agones-128tick-engine-bench:ci \
+            --profile baseline --servers 2 --duration 20
+
+      - name: Degraded benchmark
+        run: |
+          docker run --rm --cap-add NET_ADMIN -v "$RUNNER_TEMP/reports:/reports" agones-128tick-engine-bench:ci \
+            --profile degraded --servers 2 --duration 30
+
+      - name: Benchmark summary
+        if: always()
+        run: |
+          shopt -s nullglob
+          for report in "$RUNNER_TEMP"/reports/*.json; do
+            jq -r '"### \(.label): \(if .passed then "PASS" else "FAIL" end)", "",
+                   "| Check | Result | Detail |", "|---|---|---|",
+                   (.checks[] | "| \(.name) | \(if .passed then "PASS" else "FAIL" end) | \(.detail) |"), ""' \
+              "$report" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: benchmark-reports
+          path: ${{ runner.temp }}/reports
+          if-no-files-found: ignore
