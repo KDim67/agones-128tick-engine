@@ -72,9 +72,15 @@ size_t Metrics::Serialize(char* out_buffer, size_t max_bytes) const noexcept {
     int written = 0;
     int offset = 0;
 
+    // Literal lines go through "%s" so no caller string is ever parsed as a format
     auto append = [&](const char* format, auto... args) {
         if (offset < static_cast<int>(max_bytes)) {
-            written = std::snprintf(out_buffer + offset, max_bytes - static_cast<size_t>(offset), format, args...);
+            const size_t room = max_bytes - static_cast<size_t>(offset);
+            if constexpr (sizeof...(args) == 0) {
+                written = std::snprintf(out_buffer + offset, room, "%s", format);
+            } else {
+                written = std::snprintf(out_buffer + offset, room, format, args...);
+            }
             if (written > 0) {
                 offset += written;
             }
