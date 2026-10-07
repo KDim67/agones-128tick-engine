@@ -83,6 +83,8 @@ struct ServerSummary {
     double inputs_redundant{0.0};
     double inputs_overflow{0.0};
     double malformed{0.0};
+    double net_pool_failures{0.0};
+    double net_pool_peak_bytes{0.0};
 };
 
 struct Totals {
@@ -378,6 +380,8 @@ ServerSummary SummarizeServer(const Endpoint& endpoint, const loadgen::MetricsSa
     summary.inputs_redundant = delta("game_client_inputs{outcome=\"redundant\"}");
     summary.inputs_overflow = delta("game_client_inputs{outcome=\"overflow\"}");
     summary.malformed = delta("game_malformed_packets");
+    summary.net_pool_failures = delta("game_net_pool_failures");
+    summary.net_pool_peak_bytes = after.Value("game_net_pool_peak_bytes");
     return summary;
 }
 
@@ -537,11 +541,13 @@ int main(int argc, char* argv[]) {
     double inputs_missed = 0.0;
     double inputs_overflow = 0.0;
     double malformed = 0.0;
+    double net_pool_failures = 0.0;
     for (const auto& server : servers) {
         inputs_accepted += server.inputs_accepted;
         inputs_missed += server.inputs_missed;
         inputs_overflow += server.inputs_overflow;
         malformed += server.malformed;
+        net_pool_failures += server.net_pool_failures;
     }
     // Overflow was accepted then pushed out of the window; missed never arrived
     const double inputs_lost = inputs_missed + inputs_overflow;
@@ -580,11 +586,12 @@ int main(int argc, char* argv[]) {
         checks.push_back({"rewind hit position error", !totals.hit_error_m.empty() && hit_error_p99_mm <= opts.max_hit_error_p99_mm, detail});
     }
     {
-        // netem never corrupts or duplicates, so any of these is a protocol fault
-        char detail[96];
-        std::snprintf(detail, sizeof(detail), "%.0f malformed packets, %llu unexpected shot results", malformed,
-                      static_cast<unsigned long long>(totals.unexpected_results));
-        checks.push_back({"protocol integrity", malformed == 0.0 && totals.unexpected_results == 0, detail});
+        // netem never corrupts or duplicates, and the pool is sized for full load, so any of these is a fault
+        char detail[128];
+        std::snprintf(detail, sizeof(detail), "%.0f malformed packets, %llu unexpected shot results, %.0f pool refusals",
+                      malformed, static_cast<unsigned long long>(totals.unexpected_results), net_pool_failures);
+        checks.push_back({"transport integrity", malformed == 0.0 && totals.unexpected_results == 0 && net_pool_failures == 0.0,
+                          detail});
     }
     const bool all_passed = std::all_of(checks.begin(), checks.end(), [](const Check& c) { return c.passed; });
 
@@ -627,6 +634,8 @@ int main(int argc, char* argv[]) {
         std::printf("   %-21s inputs %.0f accepted, %.0f missed, %.0f redundant, %.0f overflow | shots %.0f, hits %.0f, rejected rewinds %.0f\n",
                     "", server.inputs_accepted, server.inputs_missed, server.inputs_redundant, server.inputs_overflow,
                     server.shots, server.hits, server.rejected_rewinds);
+        std::printf("   %-21s net pool peak %.1f KiB, %.0f refusals\n", "", server.net_pool_peak_bytes / 1024.0,
+                    server.net_pool_failures);
     }
 
     std::printf("\n Checks\n");
@@ -671,11 +680,12 @@ int main(int argc, char* argv[]) {
                 std::fprintf(report, "    {\"endpoint\": \"%s\", \"scraped\": %s, \"tps\": %.3f, \"tick_p50_us\": %.0f, \"tick_p99_us\": %.0f, "
                                      "\"tick_p999_us\": %.0f, \"lateness_p99_us\": %.0f, \"overruns\": %.0f, \"ticks\": %.0f, "
                                      "\"inputs_accepted\": %.0f, \"inputs_missed\": %.0f, \"inputs_redundant\": %.0f, "
-                                     "\"inputs_overflow\": %.0f, \"shots\": %.0f, \"hits\": %.0f, \"rejected_rewinds\": %.0f, \"malformed\": %.0f}%s\n",
+                                     "\"inputs_overflow\": %.0f, \"shots\": %.0f, \"hits\": %.0f, \"rejected_rewinds\": %.0f, \"malformed\": %.0f, "
+                                     "\"net_pool_peak_bytes\": %.0f, \"net_pool_failures\": %.0f}%s\n",
                              JsonEscape(s.endpoint).c_str(), s.scraped ? "true" : "false", s.tps, s.tick_p50_us, s.tick_p99_us,
                              s.tick_p999_us, s.lateness_p99_us, s.overruns, s.ticks, s.inputs_accepted, s.inputs_missed,
                              s.inputs_redundant, s.inputs_overflow, s.shots, s.hits, s.rejected_rewinds, s.malformed,
-                             i + 1 < servers.size() ? "," : "");
+                             s.net_pool_peak_bytes, s.net_pool_failures, i + 1 < servers.size() ? "," : "");
             }
             std::fprintf(report, "  ],\n  \"checks\": [\n");
             for (size_t i = 0; i < checks.size(); ++i) {
