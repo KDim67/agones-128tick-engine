@@ -65,6 +65,9 @@ public:
     // Mirror the ENet block pool high-water mark, refused allocations and peers cut off for not acking
     void SetTransportHealth(size_t pool_peak_bytes, uint64_t pool_failures, uint64_t backlog_disconnects) noexcept;
 
+    // Mirror cumulative snapshot replication volume
+    void SetSnapshotCounters(uint64_t bytes, uint64_t delta, uint64_t full) noexcept;
+
     // Serialize all registered metrics into Prometheus text format
     size_t Serialize(char* out_buffer, size_t max_bytes) const noexcept;
 
@@ -99,6 +102,9 @@ private:
     std::atomic<uint64_t> net_pool_peak_bytes_{0};
     std::atomic<uint64_t> net_pool_failures_{0};
     std::atomic<uint64_t> backlog_disconnects_{0};
+    std::atomic<uint64_t> snapshot_bytes_{0};
+    std::atomic<uint64_t> snapshots_delta_{0};
+    std::atomic<uint64_t> snapshots_full_{0};
 };
 
 } // namespace engine

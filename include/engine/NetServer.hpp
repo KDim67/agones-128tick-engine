@@ -38,6 +38,10 @@ struct NetTelemetry {
     uint64_t inputs_overflow{0};
     uint64_t packets_malformed{0};
     uint64_t backlog_disconnects{0};
+    // Snapshot payload bytes and counts; ENet and UDP headers excluded
+    uint64_t snapshot_bytes{0};
+    uint64_t snapshots_delta{0};
+    uint64_t snapshots_full{0};
 };
 
 // Zero-allocation non-blocking UDP authoritative transport
@@ -63,7 +67,7 @@ public:
     void CheckTimeouts() noexcept;
 
     // Queues one client's snapshot unsequenced; Flush() sends the tick's batch in one pass
-    void SendSnapshot(uint32_t slot_id, const uint8_t* payload, size_t payload_bytes) noexcept;
+    void SendSnapshot(uint32_t slot_id, const uint8_t* payload, size_t payload_bytes, bool delta) noexcept;
     void Flush() noexcept;
 
     // Next in-order input for this tick, paced by the session token bucket

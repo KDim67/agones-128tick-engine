@@ -144,7 +144,7 @@ void AuthoritativeServer::ReplicateSnapshots(uint32_t current_tick) noexcept {
 
         const size_t bytes = EncodeSnapshot(current, baseline, self_slot, self, snapshot_scratch_.data(), snapshot_scratch_.size());
         if (bytes > 0) {
-            net_server_.SendSnapshot(session.slot_id, snapshot_scratch_.data(), bytes);
+            net_server_.SendSnapshot(session.slot_id, snapshot_scratch_.data(), bytes, baseline != nullptr);
         }
     }
     net_server_.Flush();

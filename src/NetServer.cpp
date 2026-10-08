@@ -363,7 +363,7 @@ void NetServer::SendPacket(uint32_t slot_id, PacketType type, const void* payloa
     enet_host_flush(host_);
 }
 
-void NetServer::SendSnapshot(uint32_t slot_id, const uint8_t* payload, size_t payload_bytes) noexcept {
+void NetServer::SendSnapshot(uint32_t slot_id, const uint8_t* payload, size_t payload_bytes, bool delta) noexcept {
     if (slot_id >= kMaxPlayers || !host_ || payload_bytes > kMaxSnapshotBytes) {
         return;
     }
@@ -383,9 +383,15 @@ void NetServer::SendSnapshot(uint32_t slot_id, const uint8_t* payload, size_t pa
 
     ENetPacket* packet = enet_packet_create(snapshot_buffer_.data(), sizeof(PacketHeader) + payload_bytes,
                                             ENET_PACKET_FLAG_UNSEQUENCED);
-    if (packet && enet_peer_send(session.peer, 0, packet) != 0) {
-        enet_packet_destroy(packet);
+    if (!packet) {
+        return;
     }
+    if (enet_peer_send(session.peer, 0, packet) != 0) {
+        enet_packet_destroy(packet);
+        return;
+    }
+    telemetry_.snapshot_bytes += sizeof(PacketHeader) + payload_bytes;
+    ++(delta ? telemetry_.snapshots_delta : telemetry_.snapshots_full);
 }
 
 void NetServer::Flush() noexcept {

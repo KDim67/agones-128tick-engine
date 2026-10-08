@@ -23,6 +23,8 @@ constexpr int kExitUsage = 64;
 constexpr int kExitInternal = 70;
 constexpr int kExitChecksFailed = 1;
 constexpr double kMetresToMm = 1000.0;
+// Protocol v2 sent every entity as 48 raw bytes behind a 5-byte header and the 4-byte packet header, every tick
+constexpr double kLegacySnapshotBytes = 489.0;
 
 struct Endpoint {
     std::string host;
@@ -50,6 +52,7 @@ struct Options {
     double min_hit_confirmation{0.98};
     double max_hit_error_p99_mm{1.0};
     double max_input_loss{0.001};
+    double max_snapshot_kbps{160.0};
 };
 
 enum class RunStage : int { Warmup, Measure, Drain, Stop };
@@ -87,6 +90,9 @@ struct ServerSummary {
     double net_pool_peak_bytes{0.0};
     double backlog_disconnects{0.0};
     double throttled_shots{0.0};
+    double snapshot_bytes{0.0};
+    double snapshots_delta{0.0};
+    double snapshots_full{0.0};
 };
 
 struct Totals {
@@ -158,7 +164,7 @@ void PrintUsage() {
         "  --seed N                 behavior seed (default 1)\n"
         "  --label NAME --report FILE.json\n"
         "  --max-tick-p99-us X --max-overrun-ratio X --min-tps X --max-lateness-p99-us X\n"
-        "  --min-hit-confirmation X --max-hit-error-p99-mm X --max-input-loss X\n",
+        "  --min-hit-confirmation X --max-hit-error-p99-mm X --max-input-loss X --max-snapshot-kbps X\n",
         engine::kMaxPlayers, engine::kInputRedundancy, engine::kInputRedundancy);
 }
 
@@ -214,6 +220,8 @@ bool ParseOptions(int argc, char* argv[], Options& opts) {
             ok = ok && ParseNumber(value, opts.max_hit_error_p99_mm);
         } else if (arg == "--max-input-loss") {
             ok = ok && ParseNumber(value, opts.max_input_loss);
+        } else if (arg == "--max-snapshot-kbps") {
+            ok = ok && ParseNumber(value, opts.max_snapshot_kbps);
         } else {
             std::fprintf(stderr, "Unknown argument: %s\n", argv[i]);
             return false;
@@ -389,6 +397,9 @@ ServerSummary SummarizeServer(const Endpoint& endpoint, const loadgen::MetricsSa
     summary.net_pool_failures = delta("game_net_pool_failures");
     summary.backlog_disconnects = delta("game_reliable_backlog_disconnects");
     summary.throttled_shots = delta("game_throttled_shots");
+    summary.snapshot_bytes = delta("game_snapshot_bytes");
+    summary.snapshots_delta = delta("game_snapshots{encoding=\"delta\"}");
+    summary.snapshots_full = delta("game_snapshots{encoding=\"full\"}");
     summary.net_pool_peak_bytes = after.Value("game_net_pool_peak_bytes");
     return summary;
 }
@@ -552,6 +563,10 @@ int main(int argc, char* argv[]) {
     double net_pool_failures = 0.0;
     double backlog_disconnects = 0.0;
     double throttled_shots = 0.0;
+    double snapshot_bytes = 0.0;
+    double snapshots_sent = 0.0;
+    double snapshots_delta = 0.0;
+    double window_s = 0.0;
     for (const auto& server : servers) {
         inputs_accepted += server.inputs_accepted;
         inputs_missed += server.inputs_missed;
@@ -560,7 +575,16 @@ int main(int argc, char* argv[]) {
         net_pool_failures += server.net_pool_failures;
         backlog_disconnects += server.backlog_disconnects;
         throttled_shots += server.throttled_shots;
+        snapshot_bytes += server.snapshot_bytes;
+        snapshots_sent += server.snapshots_delta + server.snapshots_full;
+        snapshots_delta += server.snapshots_delta;
+        window_s = std::max(window_s, server.window_s);
     }
+    // Every client receives one snapshot per tick, so bytes per snapshot times the tick rate is the per-client rate
+    const double snapshot_bytes_avg = Ratio(snapshot_bytes, snapshots_sent);
+    const double snapshot_kbps = snapshot_bytes_avg * engine::kTickRate * 8.0 / 1000.0;
+    const double legacy_kbps = kLegacySnapshotBytes * engine::kTickRate * 8.0 / 1000.0;
+    const double delta_share = Ratio(snapshots_delta, snapshots_sent);
     // Overflow was accepted then pushed out of the window; missed never arrived
     const double inputs_lost = inputs_missed + inputs_overflow;
     const double inputs_total = inputs_accepted + inputs_missed;
@@ -612,12 +636,18 @@ int main(int argc, char* argv[]) {
         // Bots honor the cooldown in client ticks, so any throttle means client and server disagree on fire timing
         std::snprintf(detail, sizeof(detail), "%.0f fire inputs throttled by the server", throttled_shots);
         checks.push_back({"weapon cooldown agreement", throttled_shots == 0.0, detail});
+
+        std::snprintf(detail, sizeof(detail), "%.1f kbps per client, %.0f B per snapshot, %.1f%% delta-encoded",
+                      snapshot_kbps, snapshot_bytes_avg, delta_share * 100.0);
+        checks.push_back({"snapshot bandwidth", snapshots_sent > 0.0 && snapshot_kbps <= opts.max_snapshot_kbps, detail});
     }
     const bool all_passed = std::all_of(checks.begin(), checks.end(), [](const Check& c) { return c.passed; });
 
     std::printf("\n Network (client view)\n");
     std::printf("   RTT (ENet)              avg %.1f ms, max %u ms, variance avg %.1f ms\n", rtt_avg_ms, totals.rtt_ms_max, rtt_variance_avg_ms);
     std::printf("   Interpolation delay     avg %.2f ticks (%.1f ms)\n", interp_delay_ticks, interp_delay_ticks * 1000.0 / engine::kTickRate);
+    std::printf("   Snapshot bandwidth      %.1f kbps per client, %.0f B avg, %.1f%% delta | full v2 snapshots: %.1f kbps (%.1fx)\n",
+                snapshot_kbps, snapshot_bytes_avg, delta_share * 100.0, legacy_kbps, Ratio(legacy_kbps, snapshot_kbps));
     std::printf("   Snapshots               %llu received, %.2f%% missing, %.2f%% reordered\n",
                 static_cast<unsigned long long>(totals.snapshots_received), snapshot_loss * 100.0, snapshot_reorder * 100.0);
     std::printf("   Connect latency         max %.1f ms\n", totals.connect_ms_max);
@@ -677,6 +707,8 @@ int main(int argc, char* argv[]) {
             std::fprintf(report, "  \"config\": {\"clients\": %u, \"servers\": %zu, \"window_s\": %u, \"redundancy\": %u, \"fire_interval_ms\": %u, \"aim\": \"%s\"},\n",
                          opts.clients, opts.servers.size(), opts.duration_s, opts.redundancy, opts.fire_interval_ms,
                          loadgen::AimModeName(opts.aim));
+            std::fprintf(report, "  \"snapshots\": {\"bytes_avg\": %.2f, \"kbps_per_client\": %.3f, \"delta_share\": %.6f, \"legacy_kbps\": %.3f, \"window_s\": %.3f},\n",
+                         snapshot_bytes_avg, snapshot_kbps, delta_share, legacy_kbps, window_s);
             std::fprintf(report, "  \"network\": {\"rtt_avg_ms\": %.2f, \"rtt_max_ms\": %u, \"rtt_variance_avg_ms\": %.2f, \"interp_delay_ticks\": %.3f, "
                                  "\"snapshots_received\": %llu, \"snapshot_loss\": %.6f, \"snapshot_reorder\": %.6f},\n",
                          rtt_avg_ms, totals.rtt_ms_max, rtt_variance_avg_ms, interp_delay_ticks,

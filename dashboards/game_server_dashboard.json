@@ -318,6 +318,41 @@
           }
         ]
       }
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+      "id": 11,
+      "title": "Snapshot Bandwidth per Client and Delta Share",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (gameserver) (rate(game_snapshot_bytes[1m])) * 8 / 1000 / clamp_min(sum by (gameserver) (game_active_players), 1)",
+          "legendFormat": "{{gameserver}} kbps per client",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(rate(game_snapshots{encoding=\"delta\"}[1m])) / clamp_min(sum(rate(game_snapshots[1m])), 1)",
+          "legendFormat": "delta share",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Kbits"
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byFrameRefID", "options": "B" },
+            "properties": [
+              { "id": "unit", "value": "percentunit" },
+              { "id": "custom.axisPlacement", "value": "right" }
+            ]
+          }
+        ]
+      }
     }
   ],
   "refresh": "5s",

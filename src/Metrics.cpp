@@ -55,6 +55,12 @@ void Metrics::SetTransportHealth(size_t pool_peak_bytes, uint64_t pool_failures,
     backlog_disconnects_.store(backlog_disconnects, std::memory_order_relaxed);
 }
 
+void Metrics::SetSnapshotCounters(uint64_t bytes, uint64_t delta, uint64_t full) noexcept {
+    snapshot_bytes_.store(bytes, std::memory_order_relaxed);
+    snapshots_delta_.store(delta, std::memory_order_relaxed);
+    snapshots_full_.store(full, std::memory_order_relaxed);
+}
+
 void Metrics::SetInputCounters(uint64_t accepted, uint64_t missed, uint64_t redundant,
                                uint64_t overflow, uint64_t malformed) noexcept {
     inputs_accepted_.store(accepted, std::memory_order_relaxed);
@@ -190,6 +196,18 @@ size_t Metrics::Serialize(char* out_buffer, size_t max_bytes) const noexcept {
     append("# TYPE game_reliable_backlog_disconnects counter\n");
     append("game_reliable_backlog_disconnects %llu\n",
            static_cast<unsigned long long>(backlog_disconnects_.load(std::memory_order_relaxed)));
+
+    append("# HELP game_snapshot_bytes Snapshot payload bytes sent, ENet and UDP headers excluded\n");
+    append("# TYPE game_snapshot_bytes counter\n");
+    append("game_snapshot_bytes %llu\n",
+           static_cast<unsigned long long>(snapshot_bytes_.load(std::memory_order_relaxed)));
+
+    append("# HELP game_snapshots Snapshots sent, by encoding\n");
+    append("# TYPE game_snapshots counter\n");
+    append("game_snapshots{encoding=\"delta\"} %llu\n",
+           static_cast<unsigned long long>(snapshots_delta_.load(std::memory_order_relaxed)));
+    append("game_snapshots{encoding=\"full\"} %llu\n",
+           static_cast<unsigned long long>(snapshots_full_.load(std::memory_order_relaxed)));
 
     // Stateset: one series per state, active at 1
     append("# HELP game_agones_state Agones GameServer lifecycle state reported by the SDK sidecar\n");
