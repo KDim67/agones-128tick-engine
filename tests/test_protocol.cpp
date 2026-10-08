@@ -1,9 +1,12 @@
 #include "engine/Protocol.hpp"
 #include "engine/InputReorderBuffer.hpp"
+#include "engine/SnapshotCodec.hpp"
 #include "Check.hpp"
 
 #include <array>
+#include <cmath>
 #include <cstdio>
+#include <initializer_list>
 
 namespace {
 
@@ -257,6 +260,138 @@ void TestReorderBufferGapAndStallCredit() {
                 engine::kInputHoleWaitTicks);
 }
 
+engine::PlayerEntity Player(uint32_t slot, float x, float z, float yaw) {
+    engine::PlayerEntity player{};
+    player.slot_id = slot;
+    player.is_active = true;
+    player.flags = engine::EntityFlag_Alive | engine::EntityFlag_Grounded;
+    player.health = 100;
+    player.position = {x, 0.0f, z};
+    player.velocity = {7.5f, 0.0f, -2.25f};
+    player.view_pitch = -12.5f;
+    player.view_yaw = yaw;
+    return player;
+}
+
+engine::ReplicatedFrame Frame(uint32_t tick, std::initializer_list<engine::PlayerEntity> players) {
+    engine::ReplicatedFrame frame;
+    frame.tick = tick;
+    for (const auto& player : players) {
+        frame.present = static_cast<uint16_t>(frame.present | (1u << player.slot_id));
+        frame.entities[player.slot_id] = engine::QuantizeEntity(player);
+    }
+    return frame;
+}
+
+void TestQuantizationRoundTrip() {
+    std::printf("[Test] Running Replicated State Quantization...\n");
+
+    // Decoded values sit exactly on the grid: requantizing is lossless, so client renders and server rewinds agree bit for bit
+    for (const float x : {-49.9f, -12.3456f, 0.0f, 0.001f, 33.33f, 49.99f}) {
+        const engine::PlayerEntity player = Player(0, x, -0.5f * x, 123.456f);
+        const engine::QuantizedEntity quantized = engine::QuantizeEntity(player);
+        engine::PlayerEntity decoded{};
+        engine::ApplyQuantized(quantized, decoded);
+        CHECK(std::abs(decoded.position.x - x) <= 0.5f / engine::kPositionUnitsPerMetre);
+        CHECK(std::abs(decoded.position.z + 0.5f * x) <= 0.5f / engine::kPositionUnitsPerMetre);
+        CHECK(engine::QuantizeEntity(decoded) == quantized);
+    }
+
+    CHECK(engine::QuantizeYaw(180.0f) == 32768);
+    CHECK(engine::QuantizeYaw(359.999f) == 0);
+    CHECK(engine::QuantizeSigned(std::nanf(""), engine::kPositionUnitsPerMetre) == 0);
+    CHECK(engine::QuantizeSigned(1e9f, engine::kPositionUnitsPerMetre) == 32767);
+
+    std::printf("  -> Positions within %.2f mm, angles within %.4f deg; requantizing decoded state is exact.\n",
+                500.0 / engine::kPositionUnitsPerMetre, 0.5 / engine::kAngleUnitsPerDegree);
+}
+
+void TestSnapshotDeltaEncoding() {
+    std::printf("[Test] Running Delta Snapshot Encoding Against an Acked Baseline...\n");
+    const engine::SelfState self{.position = {-16.0123f, 0.25f, 3.0f}, .velocity = {1.0f, 2.0f, 3.0f},
+                                 .last_input_seq = 4242, .flags = 3, .health = 77};
+    const engine::PlayerEntity owner = Player(0, -16.0f, 0.0f, 90.0f);
+    engine::PlayerEntity mover = Player(1, -12.0f, 0.0f, 45.0f);
+    const engine::PlayerEntity idle = Player(2, -8.0f, 0.0f, 270.0f);
+    const engine::PlayerEntity leaver = Player(3, -4.0f, 0.0f, 10.0f);
+    const engine::ReplicatedFrame baseline = Frame(100, {owner, mover, idle, leaver});
+
+    mover.position.x += 0.0586f;
+    mover.view_yaw = 47.5f;
+    const engine::PlayerEntity joiner = Player(4, 0.0f, 0.0f, 0.0f);
+    const engine::ReplicatedFrame current = Frame(116, {owner, mover, idle, joiner});
+
+    // Header, own full-precision state, mover's position and view, idle's empty mask, joiner whole; the leaver costs nothing
+    std::array<uint8_t, engine::kMaxSnapshotBytes> wire{};
+    const size_t delta_bytes = engine::EncodeSnapshot(current, &baseline, 0, self, wire.data(), wire.size());
+    CHECK(delta_bytes == engine::kSnapshotHeaderBytes + engine::kSelfStateBytes + 11 + 1 + engine::kMaxEntityDeltaBytes);
+
+    engine::ReplicatedFrame decoded;
+    engine::SelfState decoded_self{};
+    uint8_t self_slot = engine::kNoSelfSlot;
+    CHECK(engine::DecodeSnapshot(wire.data(), delta_bytes, &baseline, decoded, decoded_self, self_slot));
+    CHECK(decoded.tick == 116 && decoded.present == current.present && self_slot == 0);
+    for (const uint32_t slot : {1u, 2u, 4u}) {
+        CHECK(decoded.entities[slot] == current.entities[slot]);
+    }
+    CHECK(decoded_self.position.x == self.position.x && decoded_self.velocity.z == self.velocity.z);
+    CHECK(decoded_self.last_input_seq == 4242 && decoded_self.flags == 3 && decoded_self.health == 77);
+
+    const size_t full_bytes = engine::EncodeSnapshot(current, nullptr, 0, self, wire.data(), wire.size());
+    CHECK(full_bytes == engine::kSnapshotHeaderBytes + engine::kSelfStateBytes + 3 * engine::kMaxEntityDeltaBytes);
+
+    // A full server with nothing to diff against is the bound every buffer is sized for
+    engine::ReplicatedFrame crowded;
+    crowded.tick = 200;
+    for (uint32_t slot = 0; slot < engine::kMaxPlayers; ++slot) {
+        crowded.present = static_cast<uint16_t>(crowded.present | (1u << slot));
+        crowded.entities[slot] = engine::QuantizeEntity(Player(slot, static_cast<float>(slot), 1.0f, 2.0f));
+    }
+    CHECK(engine::EncodeSnapshot(crowded, nullptr, 0, self, wire.data(), wire.size()) == engine::kMaxSnapshotBytes);
+    CHECK(engine::EncodeSnapshot(crowded, nullptr, 0, self, wire.data(), wire.size() - 1) == 0);
+
+    std::printf("  -> %zu-byte delta vs %zu-byte full encode (legacy full snapshot: 489 bytes); worst case %zu bytes.\n",
+                delta_bytes, full_bytes, engine::kMaxSnapshotBytes);
+}
+
+void TestSnapshotRejectsBadFraming() {
+    std::printf("[Test] Running Delta Snapshot Framing Validation...\n");
+    const engine::SelfState self{};
+    engine::PlayerEntity mover = Player(1, 5.0f, 5.0f, 0.0f);
+    const engine::ReplicatedFrame baseline = Frame(10, {Player(0, 0.0f, 0.0f, 0.0f), mover});
+    mover.position.z += 1.0f;
+    const engine::ReplicatedFrame current = Frame(11, {Player(0, 0.0f, 0.0f, 0.0f), mover});
+
+    std::array<uint8_t, engine::kMaxSnapshotBytes + 1> wire{};
+    const size_t bytes = engine::EncodeSnapshot(current, &baseline, 0, self, wire.data(), engine::kMaxSnapshotBytes);
+    CHECK(bytes > 0);
+
+    engine::ReplicatedFrame frame;
+    engine::SelfState decoded_self{};
+    uint8_t self_slot = 0;
+    CHECK(!engine::DecodeSnapshot(wire.data(), bytes, nullptr, frame, decoded_self, self_slot));
+    engine::ReplicatedFrame wrong_tick = baseline;
+    wrong_tick.tick = 9;
+    CHECK(!engine::DecodeSnapshot(wire.data(), bytes, &wrong_tick, frame, decoded_self, self_slot));
+    CHECK(!engine::DecodeSnapshot(wire.data(), bytes - 1, &baseline, frame, decoded_self, self_slot));
+    CHECK(!engine::DecodeSnapshot(wire.data(), bytes + 1, &baseline, frame, decoded_self, self_slot));
+
+    // A partial mask needs the entity in the baseline it names
+    engine::ReplicatedFrame missing_entity = baseline;
+    missing_entity.present = 1u;
+    CHECK(!engine::DecodeSnapshot(wire.data(), bytes, &missing_entity, frame, decoded_self, self_slot));
+
+    std::array<uint8_t, engine::kMaxSnapshotBytes + 1> corrupt = wire;
+    corrupt[engine::kSnapshotHeaderBytes + engine::kSelfStateBytes] = 0x20;
+    CHECK(!engine::DecodeSnapshot(corrupt.data(), bytes, &baseline, frame, decoded_self, self_slot));
+    corrupt = wire;
+    corrupt[9] = static_cast<uint8_t>(corrupt[9] | 0x80);
+    CHECK(!engine::DecodeSnapshot(corrupt.data(), bytes, &baseline, frame, decoded_self, self_slot));
+
+    CHECK(engine::DecodeSnapshot(wire.data(), bytes, &baseline, frame, decoded_self, self_slot));
+    std::printf("  -> Missing or wrong baselines, truncation, trailing bytes, unknown fields and slots all rejected.\n");
+}
+
 } // namespace
 
 int main() {
@@ -271,6 +406,9 @@ int main() {
     TestReorderBufferTokenPacing();
     TestReorderBufferHeldUplinkDrains();
     TestReorderBufferGapAndStallCredit();
+    TestQuantizationRoundTrip();
+    TestSnapshotDeltaEncoding();
+    TestSnapshotRejectsBadFraming();
 
     std::printf("\nAll Protocol Verification Checks PASSED (100%%).\n");
     return 0;
