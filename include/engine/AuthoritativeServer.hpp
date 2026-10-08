@@ -7,6 +7,8 @@
 #include "HistoryBuffer.hpp"
 #include "LagCompensation.hpp"
 #include "Metrics.hpp"
+#include "SnapshotCodec.hpp"
+#include <array>
 #include <cstdint>
 
 namespace engine {
@@ -35,14 +37,17 @@ private:
     void ProcessSession(ClientSession& session, uint32_t current_tick, double dt) noexcept;
     void ResolveShot(uint32_t shooter_slot, const ClientInputPayload& input, uint32_t current_tick,
                      uint32_t oldest_tick) noexcept;
-    void BroadcastSnapshot(uint32_t current_tick) noexcept;
+    void RecordFrame(uint32_t current_tick) noexcept;
+    void ReplicateSnapshots(uint32_t current_tick) noexcept;
 
     Metrics& metrics_;
     NetServer net_server_{};
     WorldState world_state_{};
     HistoryBuffer history_buffer_{};
     LagCompensationManager lag_comp_{};
-    ServerSnapshotPayload snapshot_{};
+    std::array<ReplicatedFrame, kSnapshotFrameHistory> frames_{};
+    std::array<PlayerEntity, kMaxPlayers> replicated_players_{};
+    std::array<uint8_t, kMaxSnapshotBytes> snapshot_scratch_{};
 };
 
 } // namespace engine

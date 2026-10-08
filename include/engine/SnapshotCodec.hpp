@@ -60,6 +60,7 @@ constexpr size_t kMaxEntityDeltaBytes = 19;
 constexpr size_t kMaxSnapshotBytes = kSnapshotHeaderBytes + kSelfStateBytes + (kMaxPlayers - 1) * kMaxEntityDeltaBytes;
 
 static_assert(kMaxPlayers <= 16, "present mask is 16 bits");
+static_assert(sizeof(PacketHeader) + kMaxSnapshotBytes <= kMaxMtuPayload);
 
 [[nodiscard]] inline int16_t QuantizeSigned(float value, float units_per_unit) noexcept {
     const float scaled = std::isfinite(value) ? std::clamp(value * units_per_unit, -32767.0f, 32767.0f) : 0.0f;

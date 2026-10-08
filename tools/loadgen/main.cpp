@@ -99,6 +99,7 @@ struct Totals {
     uint64_t snapshots_received{0};
     uint64_t snapshots_reordered{0};
     uint64_t snapshot_ticks_missing{0};
+    uint64_t snapshots_undecodable{0};
     uint64_t reconcile_checks{0};
     uint64_t mispredictions{0};
     uint64_t shots_fired{0};
@@ -331,6 +332,7 @@ Totals Aggregate(const std::vector<std::unique_ptr<loadgen::BotClient>>& bots) {
         totals.snapshots_received += s.snapshots_received;
         totals.snapshots_reordered += s.snapshots_reordered;
         totals.snapshot_ticks_missing += s.snapshot_ticks_missing;
+        totals.snapshots_undecodable += s.snapshots_undecodable;
         totals.reconcile_checks += s.reconcile_checks;
         totals.mispredictions += s.mispredictions;
         totals.shots_fired += s.shots_fired;
@@ -597,11 +599,14 @@ int main(int argc, char* argv[]) {
     }
     {
         // netem never corrupts or duplicates, and the pool is sized for full load, so any of these is a fault
-        char detail[160];
-        std::snprintf(detail, sizeof(detail), "%.0f malformed packets, %llu unexpected shot results, %.0f pool refusals, %.0f backlog cutoffs",
-                      malformed, static_cast<unsigned long long>(totals.unexpected_results), net_pool_failures, backlog_disconnects);
+        char detail[192];
+        std::snprintf(detail, sizeof(detail),
+                      "%.0f malformed packets, %llu unexpected shot results, %llu undecodable snapshots, %.0f pool refusals, %.0f backlog cutoffs",
+                      malformed, static_cast<unsigned long long>(totals.unexpected_results),
+                      static_cast<unsigned long long>(totals.snapshots_undecodable), net_pool_failures, backlog_disconnects);
         checks.push_back({"transport integrity",
-                          malformed == 0.0 && totals.unexpected_results == 0 && net_pool_failures == 0.0 && backlog_disconnects == 0.0,
+                          malformed == 0.0 && totals.unexpected_results == 0 && totals.snapshots_undecodable == 0 &&
+                              net_pool_failures == 0.0 && backlog_disconnects == 0.0,
                           detail});
 
         // Bots honor the cooldown in client ticks, so any throttle means client and server disagree on fire timing

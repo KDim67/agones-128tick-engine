@@ -11,7 +11,7 @@
 namespace {
 
 static_assert(engine::kMaxControlPayloadBytes >= sizeof(engine::HitNotificationPayload));
-static_assert(engine::kMaxInputBatchBytes == 1 + engine::kInputRedundancy * sizeof(engine::ClientInputPayload));
+static_assert(engine::kMaxInputBatchBytes == 1 + sizeof(uint32_t) + engine::kInputRedundancy * sizeof(engine::ClientInputPayload));
 
 std::array<engine::ClientInputPayload, engine::kInputRedundancy> MakeInputs() {
     std::array<engine::ClientInputPayload, engine::kInputRedundancy> inputs{};
@@ -31,11 +31,14 @@ void TestInputBatchRoundTrip() {
 
     for (size_t count = 1; count <= engine::kInputRedundancy; ++count) {
         std::array<uint8_t, engine::kMaxInputBatchBytes> wire{};
-        const size_t bytes = engine::EncodeInputBatch(inputs.data(), count, wire.data(), wire.size());
+        const uint32_t snapshot_ack = 9000 + static_cast<uint32_t>(count);
+        const size_t bytes = engine::EncodeInputBatch(inputs.data(), count, snapshot_ack, wire.data(), wire.size());
         CHECK(bytes == engine::InputBatchBytes(count));
 
         std::array<engine::ClientInputPayload, engine::kInputRedundancy> decoded{};
-        CHECK(engine::DecodeInputBatch(wire.data(), bytes, decoded) == count);
+        uint32_t decoded_ack = 0;
+        CHECK(engine::DecodeInputBatch(wire.data(), bytes, decoded, decoded_ack) == count);
+        CHECK(decoded_ack == snapshot_ack);
         for (size_t i = 0; i < count; ++i) {
             CHECK(decoded[i].sequence == inputs[i].sequence);
             CHECK(decoded[i].ack_tick == inputs[i].ack_tick);
@@ -53,20 +56,22 @@ void TestMalformedBatchRejection() {
     const auto inputs = MakeInputs();
     std::array<uint8_t, engine::kMaxInputBatchBytes + 8> wire{};
     std::array<engine::ClientInputPayload, engine::kInputRedundancy> decoded{};
+    uint32_t ack = 0;
+    constexpr uint32_t kAck = engine::kNoBaseline;
 
-    const size_t bytes = engine::EncodeInputBatch(inputs.data(), engine::kInputRedundancy, wire.data(), wire.size());
-    CHECK(engine::DecodeInputBatch(wire.data(), 0, decoded) == 0);
-    CHECK(engine::DecodeInputBatch(wire.data(), bytes - 1, decoded) == 0);
-    CHECK(engine::DecodeInputBatch(wire.data(), bytes + 1, decoded) == 0);
+    const size_t bytes = engine::EncodeInputBatch(inputs.data(), engine::kInputRedundancy, kAck, wire.data(), wire.size());
+    CHECK(engine::DecodeInputBatch(wire.data(), 0, decoded, ack) == 0);
+    CHECK(engine::DecodeInputBatch(wire.data(), bytes - 1, decoded, ack) == 0);
+    CHECK(engine::DecodeInputBatch(wire.data(), bytes + 1, decoded, ack) == 0);
 
     wire[0] = 0;
-    CHECK(engine::DecodeInputBatch(wire.data(), engine::InputBatchBytes(0), decoded) == 0);
+    CHECK(engine::DecodeInputBatch(wire.data(), engine::InputBatchBytes(0), decoded, ack) == 0);
     wire[0] = static_cast<uint8_t>(engine::kInputRedundancy + 1);
-    CHECK(engine::DecodeInputBatch(wire.data(), engine::InputBatchBytes(engine::kInputRedundancy + 1), decoded) == 0);
+    CHECK(engine::DecodeInputBatch(wire.data(), engine::InputBatchBytes(engine::kInputRedundancy + 1), decoded, ack) == 0);
 
-    CHECK(engine::EncodeInputBatch(inputs.data(), 0, wire.data(), wire.size()) == 0);
-    CHECK(engine::EncodeInputBatch(inputs.data(), engine::kInputRedundancy + 1, wire.data(), wire.size()) == 0);
-    CHECK(engine::EncodeInputBatch(inputs.data(), engine::kInputRedundancy, wire.data(),
+    CHECK(engine::EncodeInputBatch(inputs.data(), 0, kAck, wire.data(), wire.size()) == 0);
+    CHECK(engine::EncodeInputBatch(inputs.data(), engine::kInputRedundancy + 1, kAck, wire.data(), wire.size()) == 0);
+    CHECK(engine::EncodeInputBatch(inputs.data(), engine::kInputRedundancy, kAck, wire.data(),
                                    engine::InputBatchBytes(engine::kInputRedundancy) - 1) == 0);
 
     std::printf("  -> Zero, oversized and length-mismatched batches rejected on both ends.\n");

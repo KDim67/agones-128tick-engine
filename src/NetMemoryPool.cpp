@@ -1,6 +1,7 @@
 #include "engine/NetMemoryPool.hpp"
 #include "engine/Common.hpp"
 #include "engine/Protocol.hpp"
+#include "engine/SnapshotCodec.hpp"
 #include <enet/enet.h>
 #include <cstdlib>
 #include <new>
@@ -13,7 +14,7 @@ static_assert(sizeof(ENetAcknowledgement) <= kNetPoolClasses[1].block_bytes);
 static_assert(sizeof(ENetOutgoingCommand) <= kNetPoolClasses[1].block_bytes);
 static_assert(sizeof(ENetIncomingCommand) <= kNetPoolClasses[1].block_bytes);
 static_assert(kNetChannelCount * sizeof(ENetChannel) <= kNetPoolClasses[2].block_bytes);
-static_assert(sizeof(PacketHeader) + sizeof(ServerSnapshotPayload) <= kNetPoolClasses[3].block_bytes);
+static_assert(sizeof(PacketHeader) + kMaxSnapshotBytes <= kNetPoolClasses[2].block_bytes);
 static_assert(kMaxMtuPayload <= kNetPoolClasses.back().block_bytes);
 static_assert(alignof(std::max_align_t) <= kNetPoolClasses[0].block_bytes);
 

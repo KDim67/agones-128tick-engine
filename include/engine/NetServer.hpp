@@ -3,6 +3,7 @@
 #include "Common.hpp"
 #include "Protocol.hpp"
 #include "InputReorderBuffer.hpp"
+#include "SnapshotCodec.hpp"
 #include <enet/enet.h>
 #include <cstdint>
 #include <array>
@@ -24,6 +25,8 @@ struct ClientSession {
     ENetPeer* peer{nullptr};
     std::chrono::steady_clock::time_point last_activity{};
     InputReorderBuffer inputs{};
+    // Newest snapshot tick the client holds; the next snapshot is a delta against it
+    uint32_t snapshot_ack{kNoBaseline};
     bool spawn_pending{false};
 };
 
@@ -59,8 +62,9 @@ public:
     // Check inactive sessions and purge timed-out peers
     void CheckTimeouts() noexcept;
 
-    // Broadcast snapshot to all active client sessions
-    void BroadcastSnapshot(const ServerSnapshotPayload& snapshot) noexcept;
+    // Queues one client's snapshot unsequenced; Flush() sends the tick's batch in one pass
+    void SendSnapshot(uint32_t slot_id, const uint8_t* payload, size_t payload_bytes) noexcept;
+    void Flush() noexcept;
 
     // Next in-order input for this tick, paced by the session token bucket
     [[nodiscard]] bool PopInput(uint32_t slot_id, ClientInputPayload& out_input) noexcept;
@@ -100,7 +104,7 @@ private:
     size_t active_players_{0};
     uint32_t current_tick_{0};
     std::array<ClientSession, kMaxPlayers> sessions_{};
-    std::array<uint8_t, sizeof(PacketHeader) + sizeof(ServerSnapshotPayload)> broadcast_buffer_{};
+    std::array<uint8_t, sizeof(PacketHeader) + kMaxSnapshotBytes> snapshot_buffer_{};
     std::array<uint8_t, sizeof(PacketHeader) + kMaxControlPayloadBytes> control_buffer_{};
     std::array<ClientInputPayload, kInputRedundancy> input_batch_{};
     NetTelemetry telemetry_{};

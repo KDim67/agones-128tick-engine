@@ -121,6 +121,7 @@ struct TestClient {
     uint32_t slot{static_cast<uint32_t>(engine::kMaxPlayers)};
     uint32_t sequence{0};
     uint32_t last_snapshot_tick{0};
+    bool snapshot_seen{false};
     bool joined{false};
     bool deaf{false};
     uint64_t shot_results{0};
@@ -181,6 +182,7 @@ struct TestClient {
                 uint32_t tick = 0;
                 std::memcpy(&tick, payload, sizeof(tick));
                 last_snapshot_tick = std::max(last_snapshot_tick, tick);
+                snapshot_seen = true;
                 break;
             }
             case engine::PacketType::ShotResult: {
@@ -233,7 +235,10 @@ struct TestClient {
         const size_t count = std::min<size_t>(sequence, engine::kInputRedundancy);
 
         std::array<uint8_t, engine::kMaxInputBatchBytes> batch{};
-        const size_t bytes = engine::EncodeInputBatch(recent.data() + (recent.size() - count), count, batch.data(), batch.size());
+        // Acking every snapshot keeps the server on its delta path
+        const uint32_t snapshot_ack = snapshot_seen ? last_snapshot_tick : engine::kNoBaseline;
+        const size_t bytes = engine::EncodeInputBatch(recent.data() + (recent.size() - count), count, snapshot_ack,
+                                                      batch.data(), batch.size());
         CHECK(bytes > 0);
         Send(engine::PacketType::ClientInput, batch.data(), bytes, false);
         enet_host_flush(host);

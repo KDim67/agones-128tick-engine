@@ -33,7 +33,7 @@ constexpr double kFixedDeltaTimeSec = 1.0 / static_cast<double>(kTickRate);
 constexpr std::chrono::nanoseconds kSleepThresholdNs{1'500'000};
 constexpr uint32_t kMaxCatchupTicks = 4;
 
-constexpr uint8_t kProtocolVersion = 2;
+constexpr uint8_t kProtocolVersion = 3;
 constexpr size_t kMaxPlayers = 10;
 // Channel 0 unsequenced state, channel 1 reliable control
 constexpr size_t kNetChannelCount = 2;

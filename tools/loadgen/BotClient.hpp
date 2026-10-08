@@ -4,6 +4,7 @@
 #include "engine/HistoryBuffer.hpp"
 #include "engine/LagCompensation.hpp"
 #include "engine/Protocol.hpp"
+#include "engine/SnapshotCodec.hpp"
 #include "engine/WorldState.hpp"
 
 #include <enet/enet.h>
@@ -45,6 +46,7 @@ struct BotStats {
     uint64_t snapshots_received{0};
     uint64_t snapshots_reordered{0};
     uint64_t snapshot_ticks_missing{0};
+    uint64_t snapshots_undecodable{0};
 
     uint64_t reconcile_checks{0};
     uint64_t mispredictions{0};
@@ -113,7 +115,8 @@ private:
     void Service(Clock::time_point now) noexcept;
     void HandlePacket(const uint8_t* data, size_t length, Clock::time_point now) noexcept;
     void OnConnected() noexcept;
-    void OnSnapshot(const engine::ServerSnapshotPayload& payload, Clock::time_point now) noexcept;
+    void OnSnapshot(const engine::ReplicatedFrame& frame, const engine::SelfState& self, uint8_t self_slot,
+                    Clock::time_point now) noexcept;
     void OnHitNotification(const engine::HitNotificationPayload& hit) noexcept;
     void OnShotResult(const engine::ShotResultPayload& result) noexcept;
     void ReconcileSelf(const engine::PlayerEntity& server_self) noexcept;
@@ -143,6 +146,8 @@ private:
     std::mt19937_64 rng_;
 
     std::array<engine::WorldSnapshot, kSnapshotRing> snapshots_{};
+    // Decoded wire frames by tick: the baselines later deltas are applied to
+    std::array<engine::ReplicatedFrame, kSnapshotRing> frames_{};
     uint32_t newest_tick_{kNoTick};
     Clock::time_point newest_arrival_{};
     float arrival_jitter_ticks_{0.0f};

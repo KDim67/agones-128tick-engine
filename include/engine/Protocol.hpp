@@ -70,27 +70,6 @@ struct ClientInputPayload {
     uint8_t reserved;
 };
 
-struct EntitySnapshot {
-    uint32_t entity_id;
-    float pos_x;
-    float pos_y;
-    float pos_z;
-    float vel_x;
-    float vel_y;
-    float vel_z;
-    float yaw;
-    float pitch;
-    uint32_t flags;
-    uint32_t last_input_seq;
-    uint8_t health;
-    uint8_t reserved[3];
-};
-
-struct ServerSnapshotPayload {
-    uint32_t server_tick;
-    uint8_t entity_count;
-    std::array<EntitySnapshot, kMaxPlayers> entities;
-};
 
 struct HitNotificationPayload {
     uint32_t shooter_slot;
@@ -144,11 +123,6 @@ static_assert(sizeof(DisconnectPayload) == 8);
 static_assert(std::is_standard_layout_v<ClientInputPayload>);
 static_assert(sizeof(ClientInputPayload) == 24);
 
-static_assert(std::is_standard_layout_v<EntitySnapshot>);
-static_assert(sizeof(EntitySnapshot) == 48);
-
-static_assert(std::is_standard_layout_v<ServerSnapshotPayload>);
-static_assert(sizeof(ServerSnapshotPayload) == 5 + (kMaxPlayers * sizeof(EntitySnapshot)));
 
 static_assert(std::is_standard_layout_v<HitNotificationPayload>);
 static_assert(sizeof(HitNotificationPayload) == 32);
@@ -157,9 +131,9 @@ static_assert(std::is_standard_layout_v<ShotResultPayload>);
 static_assert(sizeof(ShotResultPayload) == 28);
 static_assert(kMaxPlayers <= 16);
 
-// Redundant input batch: [count:u8][count x ClientInputPayload], oldest first
+// Redundant input batch: [count:u8][snapshot ack:u32][count x ClientInputPayload], oldest first
 [[nodiscard]] constexpr size_t InputBatchBytes(size_t count) noexcept {
-    return 1 + count * sizeof(ClientInputPayload);
+    return 1 + sizeof(uint32_t) + count * sizeof(ClientInputPayload);
 }
 
 constexpr size_t kMaxInputBatchBytes = InputBatchBytes(kInputRedundancy);
@@ -167,12 +141,12 @@ constexpr size_t kMaxControlPayloadBytes = std::max({sizeof(ConnectRequestPayloa
                                                      sizeof(DisconnectPayload), sizeof(HitNotificationPayload),
                                                      sizeof(ShotResultPayload)});
 
-static_assert(sizeof(PacketHeader) + sizeof(ServerSnapshotPayload) <= kMaxMtuPayload);
 static_assert(sizeof(PacketHeader) + kMaxInputBatchBytes <= kMaxMtuPayload);
 
-// Decoded input count, 0 if malformed
+// Decoded input count, 0 if malformed; snapshot_ack is the newest snapshot tick the client holds
 [[nodiscard]] inline size_t DecodeInputBatch(const uint8_t* payload, size_t bytes,
-                                             std::array<ClientInputPayload, kInputRedundancy>& out) noexcept {
+                                             std::array<ClientInputPayload, kInputRedundancy>& out,
+                                             uint32_t& snapshot_ack) noexcept {
     if (bytes < 1) {
         return 0;
     }
@@ -180,18 +154,20 @@ static_assert(sizeof(PacketHeader) + kMaxInputBatchBytes <= kMaxMtuPayload);
     if (count == 0 || count > kInputRedundancy || bytes != InputBatchBytes(count)) {
         return 0;
     }
-    std::memcpy(out.data(), payload + 1, count * sizeof(ClientInputPayload));
+    std::memcpy(&snapshot_ack, payload + 1, sizeof(snapshot_ack));
+    std::memcpy(out.data(), payload + 1 + sizeof(snapshot_ack), count * sizeof(ClientInputPayload));
     return count;
 }
 
 // Encoded byte count, 0 if count or capacity is invalid
-[[nodiscard]] inline size_t EncodeInputBatch(const ClientInputPayload* inputs, size_t count,
+[[nodiscard]] inline size_t EncodeInputBatch(const ClientInputPayload* inputs, size_t count, uint32_t snapshot_ack,
                                              uint8_t* out, size_t capacity) noexcept {
     if (count == 0 || count > kInputRedundancy || capacity < InputBatchBytes(count)) {
         return 0;
     }
     out[0] = static_cast<uint8_t>(count);
-    std::memcpy(out + 1, inputs, count * sizeof(ClientInputPayload));
+    std::memcpy(out + 1, &snapshot_ack, sizeof(snapshot_ack));
+    std::memcpy(out + 1 + sizeof(snapshot_ack), inputs, count * sizeof(ClientInputPayload));
     return InputBatchBytes(count);
 }
 

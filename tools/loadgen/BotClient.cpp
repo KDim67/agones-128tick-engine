@@ -39,20 +39,6 @@ void AnglesTowards(const engine::Vec3& from, const engine::Vec3& to, float& pitc
     engine::DirectionToAngles((to - from).Normalized(), pitch, yaw);
 }
 
-[[nodiscard]] engine::PlayerEntity FromEntitySnapshot(const engine::EntitySnapshot& entity) noexcept {
-    engine::PlayerEntity player{};
-    player.slot_id = entity.entity_id;
-    player.is_active = true;
-    player.flags = entity.flags;
-    player.health = static_cast<int16_t>(entity.health);
-    player.position = {entity.pos_x, entity.pos_y, entity.pos_z};
-    player.velocity = {entity.vel_x, entity.vel_y, entity.vel_z};
-    player.view_pitch = entity.pitch;
-    player.view_yaw = entity.yaw;
-    player.last_applied_input_seq = entity.last_input_seq;
-    return player;
-}
-
 } // namespace
 
 BotClient::BotClient(const BotConfig& config) : config_(config), rng_(config.seed) {
@@ -215,12 +201,29 @@ void BotClient::HandlePacket(const uint8_t* data, size_t length, Clock::time_poi
         }
 
         case engine::PacketType::ServerSnapshot: {
-            if (state_ != ConnectionState::Playing || header.payload_bytes != sizeof(engine::ServerSnapshotPayload)) {
+            if (state_ != ConnectionState::Playing) {
                 return;
             }
-            engine::ServerSnapshotPayload snapshot;
-            std::memcpy(&snapshot, payload, sizeof(snapshot));
-            OnSnapshot(snapshot, now);
+            // The baseline is a frame this bot acked, so it must still be in the ring
+            engine::SnapshotHeader snapshot_header;
+            const engine::ReplicatedFrame* baseline = nullptr;
+            bool decodable = engine::ReadSnapshotHeader(payload, header.payload_bytes, snapshot_header);
+            if (decodable && snapshot_header.baseline_tick != engine::kNoBaseline) {
+                const auto& candidate = frames_[snapshot_header.baseline_tick % kSnapshotRing];
+                decodable = candidate.tick == snapshot_header.baseline_tick;
+                baseline = &candidate;
+            }
+
+            engine::ReplicatedFrame frame;
+            engine::SelfState self{};
+            uint8_t self_slot = engine::kNoSelfSlot;
+            if (!decodable || !engine::DecodeSnapshot(payload, header.payload_bytes, baseline, frame, self, self_slot)) {
+                if (measuring_) {
+                    ++stats_.snapshots_undecodable;
+                }
+                return;
+            }
+            OnSnapshot(frame, self, self_slot, now);
             return;
         }
 
@@ -249,8 +252,9 @@ void BotClient::HandlePacket(const uint8_t* data, size_t length, Clock::time_poi
     }
 }
 
-void BotClient::OnSnapshot(const engine::ServerSnapshotPayload& payload, Clock::time_point now) noexcept {
-    const uint32_t tick = payload.server_tick;
+void BotClient::OnSnapshot(const engine::ReplicatedFrame& frame, const engine::SelfState& self, uint8_t self_slot,
+                           Clock::time_point now) noexcept {
+    const uint32_t tick = frame.tick;
     if (newest_tick_ != kNoTick && tick + kSnapshotRing <= newest_tick_) {
         return;
     }
@@ -260,16 +264,24 @@ void BotClient::OnSnapshot(const engine::ServerSnapshotPayload& payload, Clock::
         return;
     }
 
+    frames_[tick % kSnapshotRing] = frame;
     stored.tick = tick;
     for (uint32_t i = 0; i < engine::kMaxPlayers; ++i) {
-        stored.players[i] = engine::PlayerEntity{};
-        stored.players[i].slot_id = i;
-    }
-    const size_t entity_count = std::min<size_t>(payload.entity_count, engine::kMaxPlayers);
-    for (size_t i = 0; i < entity_count; ++i) {
-        const auto& entity = payload.entities[i];
-        if (entity.entity_id < engine::kMaxPlayers) {
-            stored.players[entity.entity_id] = FromEntitySnapshot(entity);
+        engine::PlayerEntity& player = stored.players[i];
+        player = engine::PlayerEntity{};
+        player.slot_id = i;
+        if ((frame.present & (1u << i)) == 0) {
+            continue;
+        }
+        player.is_active = true;
+        if (i == self_slot) {
+            player.position = self.position;
+            player.velocity = self.velocity;
+            player.flags = self.flags;
+            player.health = static_cast<int16_t>(self.health);
+            player.last_applied_input_seq = self.last_input_seq;
+        } else {
+            engine::ApplyQuantized(frame.entities[i], player);
         }
     }
 
@@ -579,7 +591,10 @@ void BotClient::SendInputBatch() noexcept {
     }
 
     std::array<uint8_t, sizeof(engine::PacketHeader) + engine::kMaxInputBatchBytes> wire{};
-    const size_t payload_bytes = engine::EncodeInputBatch(batch.data(), count, wire.data() + sizeof(engine::PacketHeader),
+    // Ack the newest snapshot held so the server diffs against it
+    const uint32_t snapshot_ack = newest_tick_ == kNoTick ? engine::kNoBaseline : newest_tick_;
+    const size_t payload_bytes = engine::EncodeInputBatch(batch.data(), count, snapshot_ack,
+                                                          wire.data() + sizeof(engine::PacketHeader),
                                                           wire.size() - sizeof(engine::PacketHeader));
     if (payload_bytes == 0) {
         return;

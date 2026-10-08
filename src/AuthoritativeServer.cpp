@@ -14,11 +14,8 @@ void AuthoritativeServer::Tick(uint32_t current_tick, double dt) noexcept {
     }
 
     world_state_.ProcessRespawns(current_tick);
-
-    const uint64_t now_ns = static_cast<uint64_t>(current_tick) * static_cast<uint64_t>(kTickDurationNs.count());
-    history_buffer_.Record(current_tick, now_ns, world_state_.GetPlayers());
-
-    BroadcastSnapshot(current_tick);
+    RecordFrame(current_tick);
+    ReplicateSnapshots(current_tick);
 }
 
 void AuthoritativeServer::ProcessSession(ClientSession& session, uint32_t current_tick, double dt) noexcept {
@@ -97,34 +94,60 @@ void AuthoritativeServer::ResolveShot(uint32_t shooter_slot, const ClientInputPa
     net_server_.SendPacket(hit.victim_slot, PacketType::HitNotification, &notification, sizeof(notification), true);
 }
 
-void AuthoritativeServer::BroadcastSnapshot(uint32_t current_tick) noexcept {
-    snapshot_.server_tick = current_tick;
-    uint8_t entity_count = 0;
+// Quantized once per tick; rewinds replay exactly the positions every client decodes
+void AuthoritativeServer::RecordFrame(uint32_t current_tick) noexcept {
+    ReplicatedFrame& frame = frames_[current_tick % kSnapshotFrameHistory];
+    frame.tick = current_tick;
+    frame.present = 0;
 
-    for (const auto& p : world_state_.GetPlayers()) {
-        if (!p.is_active) {
+    const auto& players = world_state_.GetPlayers();
+    for (size_t i = 0; i < kMaxPlayers; ++i) {
+        replicated_players_[i] = players[i];
+        if (!players[i].is_active) {
             continue;
         }
-        auto& ent = snapshot_.entities[entity_count++];
-        ent.entity_id = p.slot_id;
-        ent.pos_x = p.position.x;
-        ent.pos_y = p.position.y;
-        ent.pos_z = p.position.z;
-        ent.vel_x = p.velocity.x;
-        ent.vel_y = p.velocity.y;
-        ent.vel_z = p.velocity.z;
-        ent.pitch = p.view_pitch;
-        ent.yaw = p.view_yaw;
-        ent.flags = p.flags;
-        ent.last_input_seq = p.last_applied_input_seq;
-        ent.health = static_cast<uint8_t>(p.health);
-        ent.reserved[0] = 0;
-        ent.reserved[1] = 0;
-        ent.reserved[2] = 0;
+        frame.present = static_cast<uint16_t>(frame.present | (1u << i));
+        frame.entities[i] = QuantizeEntity(players[i]);
+        ApplyQuantized(frame.entities[i], replicated_players_[i]);
     }
 
-    snapshot_.entity_count = entity_count;
-    net_server_.BroadcastSnapshot(snapshot_);
+    const uint64_t now_ns = static_cast<uint64_t>(current_tick) * static_cast<uint64_t>(kTickDurationNs.count());
+    history_buffer_.Record(current_tick, now_ns, replicated_players_);
+}
+
+// Each client gets a delta against the newest frame it confirmed, plus its own state at full precision
+void AuthoritativeServer::ReplicateSnapshots(uint32_t current_tick) noexcept {
+    const ReplicatedFrame& current = frames_[current_tick % kSnapshotFrameHistory];
+
+    for (const auto& session : net_server_.GetSessions()) {
+        if (session.state != SessionState::Connected) {
+            continue;
+        }
+
+        const ReplicatedFrame* baseline = nullptr;
+        const uint32_t ack = session.snapshot_ack;
+        if (ack != kNoBaseline && ack < current_tick && current_tick - ack < kSnapshotFrameHistory &&
+            frames_[ack % kSnapshotFrameHistory].tick == ack) {
+            baseline = &frames_[ack % kSnapshotFrameHistory];
+        }
+
+        SelfState self{};
+        uint8_t self_slot = kNoSelfSlot;
+        if (const PlayerEntity* player = world_state_.GetPlayer(session.slot_id)) {
+            self.position = player->position;
+            self.velocity = player->velocity;
+            self.last_input_seq = player->last_applied_input_seq;
+            self.flags = static_cast<uint8_t>(player->flags & 0xFFu);
+            self.health = static_cast<uint8_t>(std::clamp<int16_t>(player->health, 0, 255));
+            self_slot = static_cast<uint8_t>(session.slot_id);
+        }
+
+        const size_t bytes = EncodeSnapshot(current, baseline, self_slot, self, snapshot_scratch_.data(), snapshot_scratch_.size());
+        if (bytes > 0) {
+            net_server_.SendSnapshot(session.slot_id, snapshot_scratch_.data(), bytes);
+        }
+    }
+    net_server_.Flush();
 }
 
 } // namespace engine

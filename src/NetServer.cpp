@@ -152,6 +152,7 @@ void NetServer::HandleConnect(ENetPeer* peer) noexcept {
             session.state = SessionState::Connecting;
             session.peer = peer;
             session.inputs.Reset();
+            session.snapshot_ack = kNoBaseline;
             session.spawn_pending = false;
             session.last_activity = std::chrono::steady_clock::now();
             peer->data = &session;
@@ -225,8 +226,9 @@ void NetServer::HandlePacket(ENetPeer* peer, const uint8_t* data, size_t length)
         }
 
         const size_t payload_bytes = length - sizeof(PacketHeader);
+        uint32_t snapshot_ack = kNoBaseline;
         const size_t count = (header.payload_bytes == payload_bytes)
-            ? DecodeInputBatch(data + sizeof(PacketHeader), payload_bytes, input_batch_)
+            ? DecodeInputBatch(data + sizeof(PacketHeader), payload_bytes, input_batch_, snapshot_ack)
             : 0;
         if (count == 0) {
             ++telemetry_.packets_malformed;
@@ -256,6 +258,12 @@ void NetServer::HandlePacket(ENetPeer* peer, const uint8_t* data, size_t length)
             }
             telemetry_.inputs_missed += loss.missed;
             telemetry_.inputs_overflow += loss.overflow;
+        }
+
+        // Acks only move forward and never past the last snapshot sent
+        if (snapshot_ack != kNoBaseline && snapshot_ack < current_tick_ &&
+            (session->snapshot_ack == kNoBaseline || snapshot_ack > session->snapshot_ack)) {
+            session->snapshot_ack = snapshot_ack;
         }
         return;
     }
@@ -355,38 +363,35 @@ void NetServer::SendPacket(uint32_t slot_id, PacketType type, const void* payloa
     enet_host_flush(host_);
 }
 
-void NetServer::BroadcastSnapshot(const ServerSnapshotPayload& snapshot) noexcept {
-    if (!host_ || active_players_ == 0) {
+void NetServer::SendSnapshot(uint32_t slot_id, const uint8_t* payload, size_t payload_bytes) noexcept {
+    if (slot_id >= kMaxPlayers || !host_ || payload_bytes > kMaxSnapshotBytes) {
         return;
     }
 
-    PacketHeader header{
+    const auto& session = sessions_[slot_id];
+    if (session.state != SessionState::Connected || !session.peer) {
+        return;
+    }
+
+    const PacketHeader header{
         .type = static_cast<uint8_t>(PacketType::ServerSnapshot),
         .protocol_version = kProtocolVersion,
-        .payload_bytes = sizeof(ServerSnapshotPayload)
+        .payload_bytes = static_cast<uint16_t>(payload_bytes)
     };
+    std::memcpy(snapshot_buffer_.data(), &header, sizeof(PacketHeader));
+    std::memcpy(snapshot_buffer_.data() + sizeof(PacketHeader), payload, payload_bytes);
 
-    std::memcpy(broadcast_buffer_.data(), &header, sizeof(PacketHeader));
-    std::memcpy(broadcast_buffer_.data() + sizeof(PacketHeader), &snapshot, sizeof(ServerSnapshotPayload));
-
-    const size_t total_size = sizeof(PacketHeader) + sizeof(ServerSnapshotPayload);
-
-    ENetPacket* packet = enet_packet_create(broadcast_buffer_.data(), total_size, ENET_PACKET_FLAG_UNSEQUENCED);
-    if (!packet) {
-        return;
-    }
-
-    for (const auto& session : sessions_) {
-        if (session.state == SessionState::Connected && session.peer) {
-            enet_peer_send(session.peer, 0, packet);
-        }
-    }
-
-    // No peer took a reference: the packet is still ours to free
-    if (packet->referenceCount == 0) {
+    ENetPacket* packet = enet_packet_create(snapshot_buffer_.data(), sizeof(PacketHeader) + payload_bytes,
+                                            ENET_PACKET_FLAG_UNSEQUENCED);
+    if (packet && enet_peer_send(session.peer, 0, packet) != 0) {
         enet_packet_destroy(packet);
     }
-    enet_host_flush(host_);
+}
+
+void NetServer::Flush() noexcept {
+    if (host_) {
+        enet_host_flush(host_);
+    }
 }
 
 } // namespace engine
