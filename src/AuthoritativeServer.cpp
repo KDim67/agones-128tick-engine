@@ -8,6 +8,9 @@ void AuthoritativeServer::Tick(uint32_t current_tick, double dt) noexcept {
     if (current_tick > 0 && (current_tick % kTickRate) == 0) {
         net_server_.CheckTimeouts();
     }
+    if (current_tick % NetServer::kRttProbeIntervalTicks == 0) {
+        net_server_.ProbeRoundTrip();
+    }
 
     for (auto& session : net_server_.GetSessions()) {
         ProcessSession(session, current_tick, dt);

@@ -66,6 +66,9 @@ public:
     // Check inactive sessions and purge timed-out peers
     void CheckTimeouts() noexcept;
 
+    // Pings every connected peer; ENet only resamples RTT when a reliable command is acked
+    void ProbeRoundTrip() noexcept;
+
     // Queues one client's snapshot unsequenced; Flush() sends the tick's batch in one pass
     void SendSnapshot(uint32_t slot_id, const uint8_t* payload, size_t payload_bytes, bool delta) noexcept;
     void Flush() noexcept;
@@ -98,6 +101,8 @@ public:
     static constexpr size_t kSpareNetPeers = 4;
     // Unacked reliable packets one peer may hold in the pool; honest peers sit in single digits
     static constexpr uint32_t kMaxReliableBacklog = 64;
+    // 16 Hz probes ride in snapshot datagrams and settle the smoothed RTT within a few seconds of a route change
+    static constexpr uint32_t kRttProbeIntervalTicks = kTickRate / 16;
 
 private:
     void HandlePacket(ENetPeer* peer, const uint8_t* data, size_t length) noexcept;

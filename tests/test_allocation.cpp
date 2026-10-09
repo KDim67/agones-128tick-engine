@@ -124,6 +124,7 @@ struct TestClient {
     bool snapshot_seen{false};
     bool joined{false};
     bool deaf{false};
+    bool hold_fire{false};
     uint64_t shot_results{0};
     uint64_t throttled_results{0};
     uint64_t hits_taken{0};
@@ -227,8 +228,8 @@ struct TestClient {
         input.interp_span_ticks = 1;
         input.view_yaw = 90.0f;
         const bool spamming = deaf || slot == kSpammerSlot;
-        input.input_flags = (spamming || (tick + slot * 3) % kFirePeriodTicks == 0) ? engine::InputFlag_Fire
-                                                                                     : engine::InputFlag_None;
+        const bool fire = !hold_fire && (spamming || (tick + slot * 3) % kFirePeriodTicks == 0);
+        input.input_flags = fire ? engine::InputFlag_Fire : engine::InputFlag_None;
 
         std::rotate(recent.begin(), recent.begin() + 1, recent.end());
         recent.back() = input;
@@ -252,6 +253,54 @@ struct TestClient {
         joined = false;
     }
 };
+
+void TestRoundTripStaysFresh() {
+    std::printf("[Test] Running RTT Refresh Without Reliable Game Traffic...\n");
+    engine::Metrics metrics;
+    engine::AuthoritativeServer server{metrics};
+    CHECK(server.Initialize(0, "127.0.0.1"));
+
+    ENetAddress address{};
+    CHECK(enet_address_set_host_ip(&address, "127.0.0.1") == 0);
+    address.port = server.Net().BoundPort();
+
+    TestClient client;
+    client.hold_fire = true;
+    CHECK(client.CreateHost() && client.Connect(address));
+
+    uint32_t tick = 1;
+    auto next_tick = std::chrono::steady_clock::now();
+    auto run_tick = [&] {
+        client.Service();
+        client.SendInput(tick);
+        server.Tick(tick, engine::kFixedDeltaTimeSec);
+        ++tick;
+        next_tick += engine::kTickDurationNs;
+        std::this_thread::sleep_until(next_tick);
+    };
+    while (!client.joined && tick < kJoinTimeoutTicks) {
+        run_tick();
+    }
+    CHECK(client.joined);
+
+    // Estimate left over from a congested moment; a player who never shoots generates no reliable game packets to fix it
+    ENetPeer* peer = server.Net().GetSessions()[client.slot].peer;
+    CHECK(peer != nullptr);
+    peer->roundTripTime = 2000;
+    peer->roundTripTimeVariance = 0;
+    const uint32_t stale = server.Net().RoundTripTicks(client.slot);
+
+    const uint32_t settle_until = tick + 3 * engine::kTickRate;
+    while (tick < settle_until) {
+        run_tick();
+    }
+    const uint32_t fresh = server.Net().RoundTripTicks(client.slot);
+    CHECK(fresh < stale / 16);
+
+    client.Destroy();
+    server.Shutdown();
+    std::printf("  -> RTT bound fell from %u to %u ticks in 3 s on probes alone.\n", stale, fresh);
+}
 
 void TestSteadyStateTickIsAllocationFree() {
     std::printf("[Test] Running Live Tick Allocation Audit (10 ENet clients, kills, respawns, rejoin, fire spam, deaf client)...\n");
@@ -391,6 +440,7 @@ int main() {
     std::printf(" Agones-128 Engine: Allocation Verification\n");
     std::printf("====================================================\n");
 
+    TestRoundTripStaysFresh();
     TestSteadyStateTickIsAllocationFree();
     TestPoolClassesSpillAndSeal();
 

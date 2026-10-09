@@ -146,6 +146,17 @@ void NetServer::CheckTimeouts() noexcept {
     }
 }
 
+// Only with nothing reliable in flight: any ack resamples RTT, and a peer that stops acking holds one probe at most
+void NetServer::ProbeRoundTrip() noexcept {
+    for (const auto& session : sessions_) {
+        if (session.state == SessionState::Connected && session.peer &&
+            enet_list_empty(&session.peer->sentReliableCommands) &&
+            enet_list_empty(&session.peer->outgoingSendReliableCommands)) {
+            enet_peer_ping(session.peer);
+        }
+    }
+}
+
 void NetServer::HandleConnect(ENetPeer* peer) noexcept {
     for (auto& session : sessions_) {
         if (session.state == SessionState::Disconnected) {
