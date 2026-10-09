@@ -79,27 +79,17 @@ jobs:
           wait "$server"
           if grep -E "runtime error|Sanitizer" server.log; then exit 1; fi
 
-  container:
-    name: Images and benchmark gate
+  benchmark:
+    name: Benchmark gate
     needs: gcc
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
-      # gRPC builds from source; layer cache keeps it to the first run
-      - name: Build runtime image
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          target: runtime
-          tags: agones-128tick-engine:ci
-          load: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
+      # No gRPC in this image, so a cold cache costs minutes, not the better part of an hour
       - name: Build bench image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
@@ -107,16 +97,8 @@ jobs:
           target: bench
           tags: agones-128tick-engine-bench:ci
           load: true
-          cache-from: type=gha
-
-      # Exported root filesystem: uncompressed and independent of the image store
-      - name: Runtime image under 80 MiB
-        run: |
-          container=$(docker create agones-128tick-engine:ci)
-          size=$(docker export "$container" | wc -c)
-          docker rm "$container" > /dev/null
-          echo "runtime root filesystem: $((size / 1024 / 1024)) MiB"
-          test "$size" -le $((80 * 1024 * 1024))
+          cache-from: type=gha,scope=bench
+          cache-to: type=gha,scope=bench,mode=max
 
       # Hosted kernels ship netem, prio and u32 as modules, some only in the extra package
       - name: Load netem modules
@@ -156,3 +138,34 @@ jobs:
           name: benchmark-reports
           path: ${{ runner.temp }}/reports
           if-no-files-found: ignore
+
+  runtime-image:
+    name: Runtime image
+    needs: gcc
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      # gRPC builds from source; the layer cache keeps that to the first run and to weeks without a push
+      - name: Build runtime image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          target: runtime
+          tags: agones-128tick-engine:ci
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Exported root filesystem: uncompressed and independent of the image store
+      - name: Runtime image under 80 MiB
+        run: |
+          container=$(docker create agones-128tick-engine:ci)
+          size=$(docker export "$container" | wc -c)
+          docker rm "$container" > /dev/null
+          echo "runtime root filesystem: $((size / 1024 / 1024)) MiB"
+          test "$size" -le $((80 * 1024 * 1024))
