@@ -147,6 +147,35 @@ The manifests pull `ghcr.io/kdim67/agones-128tick-engine:0.1.0`. CI pushes that 
 
 Import `dashboards/game_server_dashboard.json` into Grafana for tick budget, lateness, rewinds, input pipeline, transport health, snapshot bandwidth and fleet state.
 
+### Local cluster
+
+k3d is enough to run the fleet end to end:
+
+```bash
+k3d cluster create agones128 --k3s-arg "--disable=traefik@server:0" --wait
+helm repo add agones https://agones.dev/chart/stable
+helm install agones agones/agones --version 1.61.0 -n agones-system --create-namespace --wait
+kubectl apply -f deploy/agones/fleet.yaml -f deploy/agones/fleetautoscaler.yaml
+kubectl get gameservers
+```
+
+Two servers go Ready within seconds. To play bots against one, build the `bench` image and run it on the cluster's Docker network so the game traffic reaches the node directly. The route into the k3s pod network (10.42.0.0/16) lets the load generator scrape the pod's metrics for its verdict.
+
+```bash
+gs=$(kubectl create -f deploy/agones/allocation.yaml -o jsonpath='{.status.gameServerName}')
+node=$(kubectl get gs "$gs" -o jsonpath='{.status.address}')
+port=$(kubectl get gs "$gs" -o jsonpath='{.status.ports[0].port}')
+pod_ip=$(kubectl get pod "$gs" -o jsonpath='{.status.podIP}')
+docker run --rm --network k3d-agones128 --cap-add NET_ADMIN --entrypoint sh agones-128tick-engine-bench -c \
+  "ip route add 10.42.0.0/16 via $node && /opt/bench/bin/load_generator --server $node:$port --metrics $pod_ip:9090 --clients 10 --duration 20"
+```
+
+An allocated server with nobody on it shuts down after `--empty-grace` (60 s in the manifests) and the fleet replaces it, so start the bots within that window. Skipping the allocation and pointing the bots at a Ready server works too: the server allocates itself when the first players arrive.
+
+Keep the bots off Docker Desktop's port forwarding. Its userland UDP proxy dropped 6% of client inputs at 128 Hz in testing, while the same run on the cluster network lost none.
+
+`k3d cluster delete agones128` removes everything.
+
 ## Metrics
 
 Served as Prometheus text on `--metrics-port`.
