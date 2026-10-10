@@ -164,3 +164,7 @@ Served as Prometheus text on `--metrics-port`.
 ## CI
 
 `.github/workflows/ci.yml` runs on pushes to `main`, pull requests and release tags: MSVC `/W4 /WX`, GCC 14 with conversion and shadowing warnings as errors, and GCC 14 under ASan + UBSan followed by a sanitized match against real bots. The benchmark job builds the bench image, loads the netem modules on the runner, and runs a baseline and a degraded match through the gates above. On `main` the runtime image is built and held under 80 MiB.
+
+## License
+
+MIT, see `LICENSE`.
